@@ -42,14 +42,12 @@ fn center_crop(image: &DynamicImage, crop_width: u32, crop_height: u32) -> Dynam
 }
 
 fn normalize<B: Backend>(input: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 4> {
-    let mean: Tensor<B, 1> = Tensor::from_floats([0.485, 0.456, 0.406], device);
-    let std: Tensor<B, 1> = Tensor::from_floats([0.229, 0.224, 0.225], device);
+    let mean: Tensor<B, 4> = Tensor::<B, 1>::from_floats([0.485, 0.456, 0.406], device)
+        .reshape([1, 3, 1, 1]);
+    let std: Tensor<B, 4> = Tensor::<B, 1>::from_floats([0.229, 0.224, 0.225], device)
+        .reshape([1, 3, 1, 1]);
 
-    input
-        .permute([0, 2, 3, 1])
-        .sub(mean.unsqueeze())
-        .div(std.unsqueeze())
-        .permute([0, 3, 1, 2])
+    input.sub(mean).div(std)
 }
 
 fn load_image<B: Backend>(
