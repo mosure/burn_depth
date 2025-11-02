@@ -5,7 +5,7 @@ pub mod model;
 #[cfg(test)]
 mod tests {
     use super::model::depth_pro::{DepthPro, DepthProConfig};
-    use burn::prelude::*;
+    use burn::{nn::interpolate::InterpolateMode, prelude::*};
     use burn_cuda::Cuda as CudaBackend;
     use burn_ndarray::NdArray as NdArrayBackend;
     use burn_wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup};
@@ -124,6 +124,24 @@ mod tests {
         assert_eq!(model.img_size(), reloaded.img_size());
     }
 
+    fn run_inference_test<B, F>(make_device: F, availability: Availability)
+    where
+        B: Backend,
+        F: Fn() -> Result<B::Device, String>,
+    {
+        let Some(device) = resolve_device::<B, _>(make_device, availability) else {
+            return;
+        };
+
+        let model = build_model::<B>(&device);
+        let size = model.img_size();
+        let input = Tensor::<B, 4>::zeros([1, 3, size, size], &device);
+        let result = model.infer(input, None, InterpolateMode::Nearest);
+
+        assert_eq!(result.depth.shape().dims(), [1, size, size]);
+        assert_eq!(result.focallength_px.shape().dims(), [1]);
+    }
+
     #[test]
     #[cfg_attr(
         not(feature = "test_wgpu_f16"),
@@ -199,6 +217,46 @@ mod tests {
     #[test]
     fn depth_pro_roundtrip_record_ndarray() {
         run_roundtrip_test::<NdArrayBackend<f32>, _>(
+            init_ndarray_device,
+            Availability::Required("NdArray backend unavailable"),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "test_wgpu_f16"),
+        ignore = "requires adapter exposing SHADER_F16; enable with `--features test_wgpu_f16`"
+    )]
+    fn depth_pro_infers_wgpu_f16() {
+        run_inference_test::<WgpuHalfBackend, _>(
+            init_wgpu_f16_device,
+            Availability::Required("WGPU<f16> backend unavailable"),
+        );
+    }
+
+    #[test]
+    fn depth_pro_infers_wgpu_f32() {
+        run_inference_test::<WgpuF32Backend, _>(
+            init_wgpu_f32_device,
+            Availability::Optional("WGPU<f32> backend test"),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(feature = "test_cuda"),
+        ignore = "requires CUDA runtime; enable with `--features test_cuda`"
+    )]
+    fn depth_pro_infers_cuda() {
+        run_inference_test::<CudaBackend<f32>, _>(
+            init_cuda_device,
+            Availability::Required("CUDA backend unavailable"),
+        );
+    }
+
+    #[test]
+    fn depth_pro_infers_ndarray() {
+        run_inference_test::<NdArrayBackend<f32>, _>(
             init_ndarray_device,
             Availability::Required("NdArray backend unavailable"),
         );
