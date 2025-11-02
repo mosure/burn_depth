@@ -1,17 +1,11 @@
 use burn::{
-    prelude::*,
     backend::wgpu::Wgpu,
+    prelude::*,
     record::{FullPrecisionSettings, NamedMpkBytesRecorder, Recorder},
 };
-use image::{
-    load_from_memory_with_format, DynamicImage, GenericImageView, ImageFormat,
-};
+use image::{load_from_memory_with_format, DynamicImage, GenericImageView, ImageFormat};
 
-use burn_depth_pro::model::depth_pro::{
-    DepthPro,
-    DepthProConfig,
-};
-
+use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
 
 // Placeholder for embedded model weights
 // In production, this would be: include_bytes!("../assets/models/depth_pro.mpk")
@@ -21,11 +15,7 @@ static STATE_ENCODED: &[u8] = &[];
 // In production, this would be: include_bytes!("../assets/images/test_0.png")
 static INPUT_IMAGE_0: &[u8] = &[];
 
-
-pub fn load_model<B: Backend>(
-    config: &DepthProConfig,
-    device: &B::Device,
-) -> DepthPro<B> {
+pub fn load_model<B: Backend>(config: &DepthProConfig, device: &B::Device) -> DepthPro<B> {
     if STATE_ENCODED.is_empty() {
         println!("Warning: No model weights embedded. Using uninitialized model.");
         return config.init(device);
@@ -39,7 +29,6 @@ pub fn load_model<B: Backend>(
     model.load_record(record)
 }
 
-
 fn center_crop(image: &DynamicImage, crop_width: u32, crop_height: u32) -> DynamicImage {
     let (img_width, img_height) = image.dimensions();
 
@@ -52,10 +41,7 @@ fn center_crop(image: &DynamicImage, crop_width: u32, crop_height: u32) -> Dynam
     image.crop_imm(x, y, crop_width, crop_height)
 }
 
-fn normalize<B: Backend>(
-    input: Tensor<B, 4>,
-    device: &B::Device,
-) -> Tensor<B, 4> {
+fn normalize<B: Backend>(input: Tensor<B, 4>, device: &B::Device) -> Tensor<B, 4> {
     let mean: Tensor<B, 1> = Tensor::from_floats([0.485, 0.456, 0.406], device);
     let std: Tensor<B, 1> = Tensor::from_floats([0.229, 0.224, 0.225], device);
 
@@ -80,15 +66,9 @@ fn load_image<B: Backend>(
         );
     let img = center_crop(&img, config.image_size as u32, config.image_size as u32);
 
-    let img_data: Vec<f32> = img.to_rgb32f()
-        .pixels()
-        .flat_map(|p| p.0)
-        .collect();
+    let img_data: Vec<f32> = img.to_rgb32f().pixels().flat_map(|p| p.0).collect();
 
-    let input: Tensor<B, 1> = Tensor::from_floats(
-        img_data.as_slice(),
-        device,
-    );
+    let input: Tensor<B, 1> = Tensor::from_floats(img_data.as_slice(), device);
 
     let input = input.reshape([
         1,
@@ -100,7 +80,6 @@ fn load_image<B: Backend>(
 
     normalize(input, device)
 }
-
 
 fn main() {
     type Backend = Wgpu<f32, i32>;
@@ -114,13 +93,18 @@ fn main() {
     if INPUT_IMAGE_0.is_empty() {
         println!("No test image available. Creating dummy input...");
         let input = Tensor::<Backend, 4>::zeros(
-            [1, config.input_channels, config.image_size, config.image_size],
+            [
+                1,
+                config.input_channels,
+                config.image_size,
+                config.image_size,
+            ],
             &device,
         );
-        
+
         println!("Running inference...");
         let output = model.forward(input);
-        
+
         println!("Output shape: {:?}", output.dims());
         println!("Correctness check complete (with dummy data).");
     } else {
@@ -131,7 +115,7 @@ fn main() {
         let output = model.forward(input);
 
         println!("Output shape: {:?}", output.dims());
-        
+
         // TODO: Compare with expected output for correctness validation
         println!("Correctness check complete.");
     }
