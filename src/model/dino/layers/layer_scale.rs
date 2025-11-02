@@ -5,7 +5,7 @@ use burn::{
 };
 
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct LayerScaleConfig {
     pub dim: usize,
 }

@@ -7,7 +7,7 @@ use burn::{
     },
 };
 
-use crate::layers::{
+use layers::{
     attention::AttentionConfig,
     block::{
         Block,
@@ -24,8 +24,10 @@ use crate::layers::{
     },
 };
 
+pub mod layers;
 
-#[derive(Config)]
+
+#[derive(Config, Debug)]
 pub struct DinoVisionTransformerConfig {
     pub image_size: usize,
     pub patch_size: usize,
@@ -255,8 +257,13 @@ impl<B: Backend> DinoVisionTransformer<B> {
         let n_dim = self.pos_embed.shape().dims[1];
         // let c_dim: usize = self.pos_embed.shape().dims[2];
 
-        let class_pos_embed: Tensor<B, 2> = self.pos_embed.val().clone().slice([0..b_dim, 0..1]).squeeze(1);
-        let patch_pos_embed = self.pos_embed.val().clone().slice([0..b_dim, 1..n_dim]);
+        let class_pos_embed: Tensor<B, 2> = self.pos_embed.val()
+            .clone()
+            .slice([0..b_dim, 0..1])
+            .squeeze_dim(1);
+        let patch_pos_embed = self.pos_embed.val()
+            .clone()
+            .slice([0..b_dim, 1..n_dim]);
         let dim = x.shape().dims[2];
         let M = N.isqrt();
 
@@ -323,8 +330,11 @@ impl<B: Backend> DinoVisionTransformer<B> {
             if layers.contains(&i) {
                 let x = self.norm.forward(x.clone());
 
-                let class_token: Tensor<B, 2> = x.clone().slice([0..x.shape().dims[0], 0..1]).squeeze(1);
-                let out = x.clone().slice([0..x.shape().dims[0], 1..x.shape().dims[1]]);
+                let class_token: Tensor<B, 2> = x.clone()
+                    .slice([0..x.shape().dims[0], 0..1])
+                    .squeeze_dim(1);
+                let out = x.clone()
+                    .slice([0..x.shape().dims[0], 1..x.shape().dims[1]]);
 
                 let [B, _, W, H] = x.shape().dims();
                 let reshaped = out.reshape([B as i32, (W / self.patch_size) as i32, (H / self.patch_size) as i32, -1])
@@ -354,8 +364,11 @@ impl<B: Backend> DinoVisionTransformer<B> {
         let b_dim = x.shape().dims[0];
         let n_dim = x.shape().dims[1];
 
-        let x_norm_clstoken = x_norm.clone().slice([0..b_dim, 0..1]).squeeze(1);
-        let x_norm_patchtokens = x_norm.clone().slice([0..b_dim, 1..n_dim]);
+        let x_norm_clstoken = x_norm.clone()
+            .slice([0..b_dim, 0..1])
+            .squeeze_dim(1);
+        let x_norm_patchtokens = x_norm.clone()
+            .slice([0..b_dim, 1..n_dim]);
 
         DinoOutput {
             x_norm_clstoken,

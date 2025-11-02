@@ -7,7 +7,7 @@ use burn::{
 };
 
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct AttentionConfig {
     pub dim: usize,
     pub num_heads: usize,
@@ -89,9 +89,9 @@ impl<B: Backend> Attention<B> {
             .reshape([B, N, 3, self.num_heads, C / self.num_heads])
             .permute([2, 0, 3, 1, 4]);
 
-        let q: Tensor<B, 4> = qkv.clone().slice([0..1]).squeeze(0) * self.scale;
-        let k = qkv.clone().slice([1..2]).squeeze(0);
-        let v = qkv.slice([2..3]).squeeze(0);
+        let q: Tensor<B, 4> = qkv.clone().slice([0..1]).squeeze_dim(0) * self.scale;
+        let k = qkv.clone().slice([1..2]).squeeze_dim(0);
+        let v = qkv.slice([2..3]).squeeze_dim(0);
 
         let attn = q.matmul(k.swap_dims(2, 3));
 

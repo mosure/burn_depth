@@ -1,7 +1,7 @@
 use burn::prelude::*;
 
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct PatchEmbedConfig {
     pub image_size: usize,
     pub patch_size: usize,

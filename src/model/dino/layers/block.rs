@@ -1,6 +1,6 @@
 use burn::prelude::*;
 
-use crate::layers::{
+use crate::model::dino::layers::{
     attention::{
         Attention,
         AttentionConfig,
@@ -20,7 +20,7 @@ use crate::layers::{
 };
 
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct BlockConfig {
     pub attn: AttentionConfig,
     pub layer_scale: Option<LayerScaleConfig>,

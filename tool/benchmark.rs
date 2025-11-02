@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use burn::{
     prelude::*,
     backend::Wgpu,
@@ -10,7 +12,8 @@ use criterion::{
     Throughput,
 };
 
-use burn_dino::model::dinov2::DinoVisionTransformerConfig;
+// TODO: benchmark depth pro
+use burn_depth_pro::model::dino::DinoVisionTransformerConfig;
 
 
 criterion_group!{

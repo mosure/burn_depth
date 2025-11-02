@@ -1,7 +1,7 @@
 use burn::prelude::*;
 
 
-#[derive(Config)]
+#[derive(Config, Debug)]
 pub struct MlpConfig {
     pub in_features: usize,
     pub hidden_features: Option<usize>,
