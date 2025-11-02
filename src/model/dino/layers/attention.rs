@@ -1,11 +1,7 @@
 use burn::{
     prelude::*,
-    tensor::activation::{
-        quiet_softmax,
-        softmax,
-    },
+    tensor::activation::{quiet_softmax, softmax},
 };
-
 
 #[derive(Config, Debug)]
 pub struct AttentionConfig {
@@ -38,7 +34,6 @@ impl AttentionConfig {
     }
 }
 
-
 #[derive(Module, Debug)]
 pub struct Attention<B: Backend> {
     pub qkv: nn::Linear<B>,
@@ -51,10 +46,7 @@ pub struct Attention<B: Backend> {
 }
 
 impl<B: Backend> Attention<B> {
-    pub fn new(
-        device: &B::Device,
-        config: AttentionConfig,
-    ) -> Self {
+    pub fn new(device: &B::Device, config: AttentionConfig) -> Self {
         let head_dim = config.dim / config.num_heads;
         let scale = (head_dim as f32).powf(-0.5);
 
@@ -85,7 +77,9 @@ impl<B: Backend> Attention<B> {
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let [B, N, C] = x.shape().dims();
 
-        let qkv = self.qkv.forward(x)
+        let qkv = self
+            .qkv
+            .forward(x)
             .reshape([B, N, 3, self.num_heads, C / self.num_heads])
             .permute([2, 0, 3, 1, 4]);
 
@@ -103,9 +97,7 @@ impl<B: Backend> Attention<B> {
 
         let attn = self.attn_drop.forward(attn);
 
-        let x = attn.matmul(v)
-            .swap_dims(1, 2)
-            .reshape([B, N, C]);
+        let x = attn.matmul(v).swap_dims(1, 2).reshape([B, N, C]);
 
         let x = self.proj.forward(x);
         self.proj_drop.forward(x)

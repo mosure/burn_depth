@@ -1,298 +1,228 @@
+use burn::{
+    module::Param,
+    nn::{
+        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
+        interpolate::InterpolateMode,
+    },
+    prelude::*,
+};
 
+pub mod layers {
+    pub mod decoder;
+    pub mod encoder;
+    pub mod fov;
+    pub mod vit;
+}
 
+use burn::tensor::activation::relu;
+use layers::{
+    decoder::MultiresConvDecoder,
+    encoder::DepthProEncoder,
+    fov::FOVNetwork,
+    vit::{DINOV2_L16_384, create_vit},
+};
 
-// from __future__ import annotations
+#[derive(Config, Debug)]
+pub struct DepthProConfig {
+    pub patch_encoder_preset: String,
+    pub image_encoder_preset: String,
+    pub decoder_features: usize,
 
-// from dataclasses import dataclass
-// from typing import Mapping, Optional, Tuple, Union
+    #[config(default = "None")]
+    pub checkpoint_uri: Option<String>,
 
-// import torch
-// from torch import nn
-// from torchvision.transforms import (
-//     Compose,
-//     ConvertImageDtype,
-//     Lambda,
-//     Normalize,
-//     ToTensor,
-// )
+    #[config(default = "None")]
+    pub fov_encoder_preset: Option<String>,
 
-// from .network.decoder import MultiresConvDecoder
-// from .network.encoder import DepthProEncoder
-// from .network.fov import FOVNetwork
-// from .network.vit_factory import VIT_CONFIG_DICT, ViTPreset, create_vit
+    #[config(default = "true")]
+    pub use_fov_head: bool,
+}
 
+impl Default for DepthProConfig {
+    fn default() -> Self {
+        Self {
+            patch_encoder_preset: DINOV2_L16_384.into(),
+            image_encoder_preset: DINOV2_L16_384.into(),
+            decoder_features: 256,
+            checkpoint_uri: None,
+            fov_encoder_preset: Some(DINOV2_L16_384.into()),
+            use_fov_head: true,
+        }
+    }
+}
 
-// @dataclass
-// class DepthProConfig:
-//     """Configuration for DepthPro."""
+#[derive(Module, Debug)]
+struct DepthHead<B: Backend> {
+    conv0: Conv2d<B>,
+    deconv: ConvTranspose2d<B>,
+    conv1: Conv2d<B>,
+    conv_out: Conv2d<B>,
+}
 
-//     patch_encoder_preset: ViTPreset
-//     image_encoder_preset: ViTPreset
-//     decoder_features: int
+impl<B: Backend> DepthHead<B> {
+    fn new(device: &B::Device, dim_decoder: usize, last_dims: (usize, usize)) -> Self {
+        let conv0 = Conv2dConfig::new([dim_decoder, dim_decoder / 2], [3, 3])
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let deconv = ConvTranspose2dConfig::new([dim_decoder / 2, dim_decoder / 2], [2, 2])
+            .with_stride([2, 2])
+            .init(device);
+        let conv1 = Conv2dConfig::new([dim_decoder / 2, last_dims.0], [3, 3])
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .init(device);
+        let mut conv_out = Conv2dConfig::new([last_dims.0, last_dims.1], [1, 1])
+            .with_bias(true)
+            .init(device);
 
-//     checkpoint_uri: Optional[str] = None
-//     fov_encoder_preset: Optional[ViTPreset] = None
-//     use_fov_head: bool = True
+        if let Some(bias) = conv_out.bias.as_ref() {
+            let zeros = Tensor::<B, 1>::zeros(bias.val().shape(), device);
+            conv_out.bias = Some(Param::from_tensor(zeros));
+        }
 
+        Self {
+            conv0,
+            deconv,
+            conv1,
+            conv_out,
+        }
+    }
 
-// DEFAULT_MONODEPTH_CONFIG_DICT = DepthProConfig(
-//     patch_encoder_preset="dinov2l16_384",
-//     image_encoder_preset="dinov2l16_384",
-//     checkpoint_uri="./checkpoints/depth_pro.pt",
-//     decoder_features=256,
-//     use_fov_head=True,
-//     fov_encoder_preset="dinov2l16_384",
-// )
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let x = relu(self.conv0.forward(x));
+        let x = self.deconv.forward(x);
+        let x = relu(self.conv1.forward(x));
+        let x = self.conv_out.forward(x);
+        relu(x)
+    }
+}
 
+#[derive(Module, Debug)]
+pub struct DepthPro<B: Backend> {
+    encoder: DepthProEncoder<B>,
+    decoder: MultiresConvDecoder<B>,
+    head: DepthHead<B>,
+    fov: Option<FOVNetwork<B>>,
+}
 
-// def create_backbone_model(
-//     preset: ViTPreset
-// ) -> Tuple[nn.Module, ViTPreset]:
-//     """Create and load a backbone model given a config.
+pub struct DepthProInference<B: Backend> {
+    pub depth: Tensor<B, 3>,
+    pub focallength_px: Tensor<B, 1>,
+}
 
-//     Args:
-//     ----
-//         preset: A backbone preset to load pre-defind configs.
+impl<B: Backend> DepthPro<B> {
+    pub fn new(device: &B::Device, config: DepthProConfig) -> Self {
+        let (patch_encoder, patch_config) = create_vit(device, &config.patch_encoder_preset);
+        let (image_encoder, _) = create_vit(device, &config.image_encoder_preset);
 
-//     Returns:
-//     -------
-//         A Torch module and the associated config.
+        let fov_encoder = config
+            .fov_encoder_preset
+            .as_ref()
+            .filter(|_| config.use_fov_head)
+            .map(|preset| create_vit(device, preset).0);
 
-//     """
-//     if preset in VIT_CONFIG_DICT:
-//         config = VIT_CONFIG_DICT[preset]
-//         model = create_vit(preset=preset, use_pretrained=False)
-//     else:
-//         raise KeyError(f"Preset {preset} not found.")
+        let encoder = DepthProEncoder::new(
+            device,
+            patch_config.encoder_feature_dims.clone(),
+            patch_encoder,
+            &patch_config,
+            image_encoder,
+            patch_config.encoder_feature_layer_ids.clone(),
+            config.decoder_features,
+        );
 
-//     return model, config
+        let mut decoder_dims = vec![config.decoder_features];
+        decoder_dims.extend(patch_config.encoder_feature_dims.clone());
 
+        let decoder = MultiresConvDecoder::new(device, decoder_dims, config.decoder_features);
 
-// def create_model_and_transforms(
-//     config: DepthProConfig = DEFAULT_MONODEPTH_CONFIG_DICT,
-//     device: torch.device = torch.device("cpu"),
-//     precision: torch.dtype = torch.float32,
-// ) -> Tuple[DepthPro, Compose]:
-//     """Create a DepthPro model and load weights from `config.checkpoint_uri`.
+        let head = DepthHead::new(device, config.decoder_features, (32, 1));
 
-//     Args:
-//     ----
-//         config: The configuration for the DPT model architecture.
-//         device: The optional Torch device to load the model onto, default runs on "cpu".
-//         precision: The optional precision used for the model, default is FP32.
+        let fov = config
+            .use_fov_head
+            .then(|| FOVNetwork::new(device, config.decoder_features, fov_encoder));
 
-//     Returns:
-//     -------
-//         The Torch DepthPro model and associated Transform.
+        Self {
+            encoder,
+            decoder,
+            head,
+            fov,
+        }
+    }
 
-//     """
-//     patch_encoder, patch_encoder_config = create_backbone_model(
-//         preset=config.patch_encoder_preset
-//     )
-//     image_encoder, _ = create_backbone_model(
-//         preset=config.image_encoder_preset
-//     )
+    pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 4>, Option<Tensor<B, 1>>) {
+        let encodings = self.encoder.forward(x.clone());
+        let (features, lowres_features) = self.decoder.forward(&encodings);
+        let canonical_inverse_depth = self.head.forward(features);
 
-//     fov_encoder = None
-//     if config.use_fov_head and config.fov_encoder_preset is not None:
-//         fov_encoder, _ = create_backbone_model(preset=config.fov_encoder_preset)
+        let fov = self.fov.as_ref().map(|fov| {
+            let fov_tensor = fov.forward(x, lowres_features);
+            let dims_fov: [usize; 4] = fov_tensor.shape().dims();
+            let batch = dims_fov[0];
+            fov_tensor.reshape([batch as i32])
+        });
 
-//     dims_encoder = patch_encoder_config.encoder_feature_dims
-//     hook_block_ids = patch_encoder_config.encoder_feature_layer_ids
-//     encoder = DepthProEncoder(
-//         dims_encoder=dims_encoder,
-//         patch_encoder=patch_encoder,
-//         image_encoder=image_encoder,
-//         hook_block_ids=hook_block_ids,
-//         decoder_features=config.decoder_features,
-//     )
-//     decoder = MultiresConvDecoder(
-//         dims_encoder=[config.decoder_features] + list(encoder.dims_encoder),
-//         dim_decoder=config.decoder_features,
-//     )
-//     model = DepthPro(
-//         encoder=encoder,
-//         decoder=decoder,
-//         last_dims=(32, 1),
-//         use_fov_head=config.use_fov_head,
-//         fov_encoder=fov_encoder,
-//     ).to(device)
+        (canonical_inverse_depth, fov)
+    }
 
-//     if precision == torch.half:
-//         model.half()
+    pub fn img_size(&self) -> usize {
+        self.encoder.img_size()
+    }
 
-//     transform = Compose(
-//         [
-//             ToTensor(),
-//             Lambda(lambda x: x.to(device)),
-//             Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]),
-//             ConvertImageDtype(precision),
-//         ]
-//     )
+    pub fn infer(
+        &self,
+        mut x: Tensor<B, 4>,
+        f_px: Option<Tensor<B, 1>>,
+        interpolation_mode: InterpolateMode,
+    ) -> DepthProInference<B> {
+        let dims: [usize; 4] = x.shape().dims();
+        let batch = dims[0];
+        let height = dims[2];
+        let width = dims[3];
+        let resize_needed = self.encoder.img_size() != height || self.encoder.img_size() != width;
 
-//     if config.checkpoint_uri is not None:
-//         state_dict = torch.load(config.checkpoint_uri, map_location="cpu")
-//         missing_keys, unexpected_keys = model.load_state_dict(
-//             state_dict=state_dict, strict=True
-//         )
+        if resize_needed {
+            let resize = burn::nn::interpolate::Interpolate2dConfig::new()
+                .with_output_size(Some([self.encoder.img_size(), self.encoder.img_size()]))
+                .with_mode(interpolation_mode.clone())
+                .init();
+            x = resize.forward(x);
+        }
 
-//         if len(unexpected_keys) != 0:
-//             raise KeyError(
-//                 f"Found unexpected keys when loading monodepth: {unexpected_keys}"
-//             )
+        let (canonical_inverse_depth, fov_deg) = self.forward(x.clone());
 
-//         # fc_norm is only for the classification head,
-//         # which we would not use. We only use the encoding.
-//         missing_keys = [key for key in missing_keys if "fc_norm" not in key]
-//         if len(missing_keys) != 0:
-//             raise KeyError(f"Keys are missing when loading monodepth: {missing_keys}")
+        let mut focal_px = if let Some(f_px) = f_px {
+            f_px.reshape([batch as i32, 1])
+        } else {
+            let fov_deg = fov_deg.expect("FOV head required for focal length");
+            let radians = fov_deg.clone() * (core::f32::consts::PI / 180.0);
+            let denom = (radians.clone() * 0.5).tan();
+            let width_tensor = fov_deg.ones_like() * (width as f32 * 0.5);
+            (width_tensor / denom).reshape([batch as i32, 1])
+        };
 
-//     return model, transform
+        let dims_focal: [usize; 2] = focal_px.shape().dims();
+        if dims_focal[0] != batch {
+            focal_px = focal_px.reshape([batch as i32, 1]);
+        }
 
+        let width_tensor = focal_px.ones_like() * (width as f32);
+        let ratio = width_tensor.clone() / focal_px.clone();
+        let ratio = ratio.reshape([batch as i32, 1, 1, 1]);
+        let mut inverse_depth = canonical_inverse_depth * ratio;
 
+        if resize_needed {
+            let resize_back = burn::nn::interpolate::Interpolate2dConfig::new()
+                .with_output_size(Some([height, width]))
+                .with_mode(interpolation_mode)
+                .init();
+            inverse_depth = resize_back.forward(inverse_depth);
+        }
 
-// class DepthPro(nn.Module):
-//     """DepthPro network."""
+        let depth = inverse_depth.clamp(1e-4, 1e4).recip().squeeze_dim(1);
 
-//     def __init__(
-//         self,
-//         encoder: DepthProEncoder,
-//         decoder: MultiresConvDecoder,
-//         last_dims: tuple[int, int],
-//         use_fov_head: bool = True,
-//         fov_encoder: Optional[nn.Module] = None,
-//     ):
-//         """Initialize DepthPro.
-
-//         Args:
-//         ----
-//             encoder: The DepthProEncoder backbone.
-//             decoder: The MultiresConvDecoder decoder.
-//             last_dims: The dimension for the last convolution layers.
-//             use_fov_head: Whether to use the field-of-view head.
-//             fov_encoder: A separate encoder for the field of view.
-
-//         """
-//         super().__init__()
-
-//         self.encoder = encoder
-//         self.decoder = decoder
-    
-//         dim_decoder = decoder.dim_decoder
-//         self.head = nn.Sequential(
-//             nn.Conv2d(
-//                 dim_decoder, dim_decoder // 2, kernel_size=3, stride=1, padding=1
-//             ),
-//             nn.ConvTranspose2d(
-//                 in_channels=dim_decoder // 2,
-//                 out_channels=dim_decoder // 2,
-//                 kernel_size=2,
-//                 stride=2,
-//                 padding=0,
-//                 bias=True,
-//             ),
-//             nn.Conv2d(
-//                 dim_decoder // 2,
-//                 last_dims[0],
-//                 kernel_size=3,
-//                 stride=1,
-//                 padding=1,
-//             ),
-//             nn.ReLU(True),
-//             nn.Conv2d(last_dims[0], last_dims[1], kernel_size=1, stride=1, padding=0),
-//             nn.ReLU(),
-//         )
-
-//         # Set the final convolution layer's bias to be 0.
-//         self.head[4].bias.data.fill_(0)
-
-//         # Set the FOV estimation head.
-//         if use_fov_head:
-//             self.fov = FOVNetwork(num_features=dim_decoder, fov_encoder=fov_encoder)
-
-//     @property
-//     def img_size(self) -> int:
-//         """Return the internal image size of the network."""
-//         return self.encoder.img_size
-
-//     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-//         """Decode by projection and fusion of multi-resolution encodings.
-
-//         Args:
-//         ----
-//             x (torch.Tensor): Input image.
-
-//         Returns:
-//         -------
-//             The canonical inverse depth map [m] and the optional estimated field of view [deg].
-
-//         """
-//         _, _, H, W = x.shape
-//         assert H == self.img_size and W == self.img_size
-
-//         encodings = self.encoder(x)
-//         features, features_0 = self.decoder(encodings)
-//         canonical_inverse_depth = self.head(features)
-
-//         fov_deg = None
-//         if hasattr(self, "fov"):
-//             fov_deg = self.fov.forward(x, features_0.detach())
-
-//         return canonical_inverse_depth, fov_deg
-
-//     @torch.no_grad()
-//     def infer(
-//         self,
-//         x: torch.Tensor,
-//         f_px: Optional[Union[float, torch.Tensor]] = None,
-//         interpolation_mode="bilinear",
-//     ) -> Mapping[str, torch.Tensor]:
-//         """Infer depth and fov for a given image.
-
-//         If the image is not at network resolution, it is resized to 1536x1536 and
-//         the estimated depth is resized to the original image resolution.
-//         Note: if the focal length is given, the estimated value is ignored and the provided
-//         focal length is use to generate the metric depth values.
-
-//         Args:
-//         ----
-//             x (torch.Tensor): Input image
-//             f_px (torch.Tensor): Optional focal length in pixels corresponding to `x`.
-//             interpolation_mode (str): Interpolation function for downsampling/upsampling. 
-
-//         Returns:
-//         -------
-//             Tensor dictionary (torch.Tensor): depth [m], focallength [pixels].
-
-//         """
-//         if len(x.shape) == 3:
-//             x = x.unsqueeze(0)
-//         _, _, H, W = x.shape
-//         resize = H != self.img_size or W != self.img_size
-
-//         if resize:
-//             x = nn.functional.interpolate(
-//                 x,
-//                 size=(self.img_size, self.img_size),
-//                 mode=interpolation_mode,
-//                 align_corners=False,
-//             )
-
-//         canonical_inverse_depth, fov_deg = self.forward(x)
-//         if f_px is None:
-//             f_px = 0.5 * W / torch.tan(0.5 * torch.deg2rad(fov_deg.to(torch.float)))
-        
-//         inverse_depth = canonical_inverse_depth * (W / f_px)
-//         f_px = f_px.squeeze()
-
-//         if resize:
-//             inverse_depth = nn.functional.interpolate(
-//                 inverse_depth, size=(H, W), mode=interpolation_mode, align_corners=False
-//             )
-
-//         depth = 1.0 / torch.clamp(inverse_depth, min=1e-4, max=1e4)
-
-//         return {
-//             "depth": depth.squeeze(),
-//             "focallength_px": f_px,
-//         }
+        DepthProInference {
+            depth,
+            focallength_px: focal_px.reshape([batch as i32]),
+        }
+    }
+}

@@ -1,50 +1,33 @@
 #![recursion_limit = "256"]
 
-use burn::{
-    prelude::*,
-    backend::Wgpu,
-};
-use criterion::{
-    BenchmarkId,
-    criterion_group,
-    criterion_main,
-    Criterion,
-    Throughput,
-};
+use burn::{backend::Wgpu, nn::interpolate::InterpolateMode, prelude::*};
+use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use half::f16;
+use std::hint::black_box;
 
-// TODO: benchmark depth pro
-use burn_depth_pro::model::dino::DinoVisionTransformerConfig;
+type BenchBackend = Wgpu<f16>;
 
-
-criterion_group!{
-    name = ladon_burn_benchmarks;
-    config = Criterion::default().sample_size(500);
+criterion_group! {
+    name = depth_pro_benchmarks;
+    config = Criterion::default().sample_size(100);
     targets = inference_benchmark,
 }
-criterion_main!(ladon_burn_benchmarks);
-
+criterion_main!(depth_pro_benchmarks);
 
 fn inference_benchmark(c: &mut Criterion) {
-    let configs = vec![
-        (DinoVisionTransformerConfig::vits(None, None), "vits"),
-        (DinoVisionTransformerConfig::vitb(None, None), "vitb"),
-        (DinoVisionTransformerConfig::vitl(None, None), "vitl"),
-        // (DinoVisionTransformerConfig::vitg(None, None), "vitg"),
-    ];
+    let device = <BenchBackend as Backend>::Device::default();
+    let model = DepthPro::<BenchBackend>::new(&device, DepthProConfig::default());
+    let image_size = model.img_size();
+    let input: Tensor<BenchBackend, 4> = Tensor::zeros([1, 3, image_size, image_size], &device);
 
-    let mut group = c.benchmark_group("burn_dinov3_inference");
-    for (config, name) in configs.iter() {
-        group.throughput(Throughput::Elements(1));
-        group.bench_with_input(
-            BenchmarkId::new("vit", name),
-            &config,
-            |b, &config| {
-                let device = Default::default();
-                let model = config.init(&device);
-                let input: Tensor<Wgpu, 4> = Tensor::zeros([1, config.input_channels, config.image_size, config.image_size], &device);
-
-                b.iter(|| model.forward(input.clone(), None).x_norm_patchtokens.to_data());
-            },
-        );
-    }
+    let mut group = c.benchmark_group("burn_depth_pro_inference");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("depth_pro_infer", |b| {
+        b.iter(|| {
+            let output = model.infer(input.clone(), None, InterpolateMode::Linear);
+            black_box(output);
+        });
+    });
+    group.finish();
 }

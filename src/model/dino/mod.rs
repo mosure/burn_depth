@@ -1,31 +1,18 @@
 use burn::{
-    prelude::*,
     module::Param,
-    nn::{
-        Gelu,
-        Initializer,
-    },
+    nn::{Gelu, Initializer},
+    prelude::*,
 };
 
 use layers::{
     attention::AttentionConfig,
-    block::{
-        Block,
-        BlockConfig,
-    },
-    layer_norm::{
-        LayerNorm,
-        LayerNormConfig,
-    },
+    block::{Block, BlockConfig},
+    layer_norm::{LayerNorm, LayerNormConfig},
     layer_scale::LayerScaleConfig,
-    patch_embed::{
-        PatchEmbed,
-        PatchEmbedConfig,
-    },
+    patch_embed::{PatchEmbed, PatchEmbedConfig},
 };
 
 pub mod layers;
-
 
 #[derive(Config, Debug)]
 pub struct DinoVisionTransformerConfig {
@@ -75,9 +62,7 @@ impl DinoVisionTransformerConfig {
                     dim,
                     ..Default::default()
                 },
-                layer_scale: LayerScaleConfig {
-                    dim,
-                }.into(),
+                layer_scale: LayerScaleConfig { dim }.into(),
                 ..Default::default()
             },
             nn::interpolate::Interpolate2dConfig {
@@ -101,7 +86,8 @@ impl DinoVisionTransformerConfig {
                 },
                 layer_scale: LayerScaleConfig {
                     dim: embedding_dimension,
-                }.into(),
+                }
+                .into(),
                 ..Default::default()
             },
             ..Self::from_size(image_size, patch_size)
@@ -125,7 +111,8 @@ impl DinoVisionTransformerConfig {
                 },
                 layer_scale: LayerScaleConfig {
                     dim: embedding_dimension,
-                }.into(),
+                }
+                .into(),
                 ..Default::default()
             },
             ..Self::from_size(image_size, patch_size)
@@ -145,14 +132,14 @@ impl DinoVisionTransformerConfig {
                 },
                 layer_scale: LayerScaleConfig {
                     dim: embedding_dimension,
-                }.into(),
+                }
+                .into(),
                 ..Default::default()
             },
             ..Self::from_size(image_size, patch_size)
         }
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct DinoOutput<B: Backend> {
@@ -161,7 +148,6 @@ pub struct DinoOutput<B: Backend> {
     pub x_prenorm: Tensor<B, 3>,
     pub masks: Option<Tensor<B, 3, Bool>>,
 }
-
 
 #[derive(Module, Debug)]
 pub struct DinoVisionTransformer<B: Backend> {
@@ -177,10 +163,7 @@ pub struct DinoVisionTransformer<B: Backend> {
 }
 
 impl<B: Backend> DinoVisionTransformer<B> {
-    pub fn new(
-        device: &B::Device,
-        config: DinoVisionTransformerConfig,
-    ) -> Self {
+    pub fn new(device: &B::Device, config: DinoVisionTransformerConfig) -> Self {
         // TODO: initialize cls_token and pos_embed with trainable weights
         // trunc_normal_(self.pos_embed, std=0.02)
         // nn.init.normal_(self.cls_token, std=1e-6)
@@ -192,21 +175,23 @@ impl<B: Backend> DinoVisionTransformer<B> {
         // if module.bias is not None:
         //     nn.init.zeros_(module.bias)
 
-        let cls_token = config.initializer.init(
-            [1, 1, config.embedding_dimension],
-            device,
-        );
+        let cls_token = config
+            .initializer
+            .init([1, 1, config.embedding_dimension], device);
 
         let num_tokens = 1;
         let pos_embed = config.initializer.init(
-            [1, config.num_patches + num_tokens, config.embedding_dimension],
+            [
+                1,
+                config.num_patches + num_tokens,
+                config.embedding_dimension,
+            ],
             device,
         );
 
-        let mask_token = config.initializer.init(
-            [1, config.embedding_dimension],
-            device,
-        );
+        let mask_token = config
+            .initializer
+            .init([1, config.embedding_dimension], device);
 
         let interpolate = config.positional_encoding_interpolate.init();
 
@@ -215,10 +200,10 @@ impl<B: Backend> DinoVisionTransformer<B> {
             config.patch_size,
             config.input_channels,
             config.embedding_dimension,
-        ).init(device);
+        )
+        .init(device);
 
-        let norm: LayerNorm<B> = LayerNormConfig::new(config.embedding_dimension)
-            .init(device);
+        let norm: LayerNorm<B> = LayerNormConfig::new(config.embedding_dimension).init(device);
 
         let mut blocks = Vec::with_capacity(config.depth);
         for _ in 0..config.depth {
@@ -240,12 +225,7 @@ impl<B: Backend> DinoVisionTransformer<B> {
     }
 
     #[allow(non_snake_case)]
-    pub fn interpolate_pos_encoding(
-        &self,
-        x: Tensor<B, 3>,
-        W: usize,
-        H: usize,
-    ) -> Tensor<B, 3> {
+    pub fn interpolate_pos_encoding(&self, x: Tensor<B, 3>, W: usize, H: usize) -> Tensor<B, 3> {
         let npatch = x.shape().dims[1] - 1;
         let N = self.pos_embed.shape().dims[1] - 1;
 
@@ -257,32 +237,29 @@ impl<B: Backend> DinoVisionTransformer<B> {
         let n_dim = self.pos_embed.shape().dims[1];
         // let c_dim: usize = self.pos_embed.shape().dims[2];
 
-        let class_pos_embed: Tensor<B, 2> = self.pos_embed.val()
+        let class_pos_embed: Tensor<B, 2> = self
+            .pos_embed
+            .val()
             .clone()
             .slice([0..b_dim, 0..1])
             .squeeze_dim(1);
-        let patch_pos_embed = self.pos_embed.val()
-            .clone()
-            .slice([0..b_dim, 1..n_dim]);
+        let patch_pos_embed = self.pos_embed.val().clone().slice([0..b_dim, 1..n_dim]);
         let dim = x.shape().dims[2];
         let M = N.isqrt();
 
-        assert!(
-            N == M * M,
-            "number of patches should be a square number",
-        );
+        assert!(N == M * M, "number of patches should be a square number",);
 
-        let patch_pos_embed = self.interpolate.forward(
-            patch_pos_embed.reshape([1, M, M, dim]).permute([0, 3, 1, 2]),
-        ).permute([0, 2, 3, 1]).reshape([1_i32, -1, dim as i32]);
+        let patch_pos_embed = self
+            .interpolate
+            .forward(
+                patch_pos_embed
+                    .reshape([1, M, M, dim])
+                    .permute([0, 3, 1, 2]),
+            )
+            .permute([0, 2, 3, 1])
+            .reshape([1_i32, -1, dim as i32]);
 
-        Tensor::cat(
-            vec![
-                class_pos_embed.unsqueeze_dim(0),
-                patch_pos_embed,
-            ],
-            1,
-        )
+        Tensor::cat(vec![class_pos_embed.unsqueeze_dim(0), patch_pos_embed], 1)
     }
 
     #[allow(non_snake_case)]
@@ -302,8 +279,13 @@ impl<B: Backend> DinoVisionTransformer<B> {
         };
 
         let x = Tensor::cat(
-            vec![self.cls_token.val().expand([x.shape().dims[0] as i64, -1, -1]), x],
-            1
+            vec![
+                self.cls_token
+                    .val()
+                    .expand([x.shape().dims[0] as i64, -1, -1]),
+                x,
+            ],
+            1,
         );
 
         let residual = self.interpolate_pos_encoding(x.clone(), W, H);
@@ -315,10 +297,7 @@ impl<B: Backend> DinoVisionTransformer<B> {
         &self,
         x: Tensor<B, 4>,
         layers: &[usize],
-    ) -> (
-        Vec<Tensor<B, 2>>,
-        Vec<Tensor<B, 4>>,
-    ) {
+    ) -> (Vec<Tensor<B, 2>>, Vec<Tensor<B, 4>>) {
         let mut x = self.prepare_tokens_with_masks(x, None);
 
         let mut class_tokens = Vec::with_capacity(layers.len());
@@ -330,14 +309,20 @@ impl<B: Backend> DinoVisionTransformer<B> {
             if layers.contains(&i) {
                 let x = self.norm.forward(x.clone());
 
-                let class_token: Tensor<B, 2> = x.clone()
-                    .slice([0..x.shape().dims[0], 0..1])
-                    .squeeze_dim(1);
-                let out = x.clone()
+                let class_token: Tensor<B, 2> =
+                    x.clone().slice([0..x.shape().dims[0], 0..1]).squeeze_dim(1);
+                let out = x
+                    .clone()
                     .slice([0..x.shape().dims[0], 1..x.shape().dims[1]]);
 
                 let [B, _, W, H] = x.shape().dims();
-                let reshaped = out.reshape([B as i32, (W / self.patch_size) as i32, (H / self.patch_size) as i32, -1])
+                let reshaped = out
+                    .reshape([
+                        B as i32,
+                        (W / self.patch_size) as i32,
+                        (H / self.patch_size) as i32,
+                        -1,
+                    ])
                     .permute([0, 3, 1, 2]);
 
                 class_tokens.push(class_token);
@@ -348,11 +333,30 @@ impl<B: Backend> DinoVisionTransformer<B> {
         (class_tokens, output)
     }
 
-    pub fn forward(
+    pub fn forward_with_intermediate_tokens(
         &self,
         x: Tensor<B, 4>,
-        masks: Option<Tensor<B, 3, Bool>>,
-    ) -> DinoOutput<B> {
+        layers: &[usize],
+    ) -> (Tensor<B, 3>, Vec<Tensor<B, 3>>) {
+        let mut tokens = self.prepare_tokens_with_masks(x, None);
+        let mut selected = Vec::with_capacity(layers.len());
+
+        for (index, block) in self.blocks.iter().enumerate() {
+            tokens = block.forward(tokens);
+
+            if layers.contains(&index) {
+                selected.push(tokens.clone());
+            }
+        }
+
+        (tokens, selected)
+    }
+
+    pub fn embedding_dimension(&self) -> usize {
+        self.cls_token.val().shape().dims[2]
+    }
+
+    pub fn forward(&self, x: Tensor<B, 4>, masks: Option<Tensor<B, 3, Bool>>) -> DinoOutput<B> {
         let mut x = self.prepare_tokens_with_masks(x, None);
 
         for block in &self.blocks {
@@ -364,11 +368,8 @@ impl<B: Backend> DinoVisionTransformer<B> {
         let b_dim = x.shape().dims[0];
         let n_dim = x.shape().dims[1];
 
-        let x_norm_clstoken = x_norm.clone()
-            .slice([0..b_dim, 0..1])
-            .squeeze_dim(1);
-        let x_norm_patchtokens = x_norm.clone()
-            .slice([0..b_dim, 1..n_dim]);
+        let x_norm_clstoken = x_norm.clone().slice([0..b_dim, 0..1]).squeeze_dim(1);
+        let x_norm_patchtokens = x_norm.clone().slice([0..b_dim, 1..n_dim]);
 
         DinoOutput {
             x_norm_clstoken,

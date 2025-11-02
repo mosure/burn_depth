@@ -1,9 +1,4 @@
-use burn::{
-    prelude::*,
-    module::Param,
-    nn::Initializer,
-};
-
+use burn::{module::Param, nn::Initializer, prelude::*};
 
 #[derive(Config, Debug)]
 pub struct LayerNormConfig {
@@ -22,7 +17,6 @@ impl LayerNormConfig {
     }
 }
 
-
 #[derive(Module, Debug)]
 pub struct LayerNorm<B: Backend> {
     pub gamma: Param<Tensor<B, 1>>,
@@ -30,17 +24,11 @@ pub struct LayerNorm<B: Backend> {
 }
 
 impl<B: Backend> LayerNorm<B> {
-    pub fn new(
-        device: &B::Device,
-        config: &LayerNormConfig,
-    ) -> Self {
+    pub fn new(device: &B::Device, config: &LayerNormConfig) -> Self {
         let gamma = Initializer::Ones.init([config.dim], device);
         let beta = Initializer::Zeros.init([config.dim], device);
 
-        Self {
-            gamma,
-            beta,
-        }
+        Self { gamma, beta }
     }
 
     pub fn forward<const D: usize>(&self, x: Tensor<B, D>) -> Tensor<B, D> {

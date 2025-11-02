@@ -4,6 +4,7 @@
 runner = "wasm-server-runner"
 rustflags = [
     "--cfg=web_sys_unstable_apis",
+    "-Ctarget-feature=+shader-f16"
     # "-C",
     # "target-feature=+atomics,+bulk-memory,+mutable-globals",  # for wasm-bindgen-rayon
 ]

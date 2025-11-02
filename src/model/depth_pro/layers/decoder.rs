@@ -1,206 +1,206 @@
-// """Copyright (C) 2024 Apple Inc. All Rights Reserved.
+use burn::tensor::activation::relu;
+use burn::{
+    nn::{
+        PaddingConfig2d,
+        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
+        norm::BatchNorm,
+        norm::BatchNormConfig,
+    },
+    prelude::*,
+};
 
-// Dense Prediction Transformer Decoder architecture.
+#[derive(Module, Debug)]
+struct ProjectionConv<B: Backend> {
+    conv: Option<Conv2d<B>>,
+}
 
-// Implements a variant of Vision Transformers for Dense Prediction, https://arxiv.org/abs/2103.13413
-// """
+impl<B: Backend> ProjectionConv<B> {
+    fn identity() -> Self {
+        Self { conv: None }
+    }
 
-// from __future__ import annotations
+    fn new(
+        device: &B::Device,
+        channels: [usize; 2],
+        kernel_size: [usize; 2],
+        padding: usize,
+        bias: bool,
+    ) -> Self {
+        let conv = Conv2dConfig::new(channels, kernel_size)
+            .with_padding(PaddingConfig2d::Explicit(padding, padding))
+            .with_bias(bias)
+            .init(device);
+        Self { conv: Some(conv) }
+    }
 
-// from typing import Iterable
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        if let Some(conv) = &self.conv {
+            conv.forward(x)
+        } else {
+            x
+        }
+    }
+}
 
-// import torch
-// from torch import nn
+#[derive(Module, Debug)]
+struct ResidualBlock<B: Backend> {
+    conv1: Conv2d<B>,
+    bn1: Option<BatchNorm<B>>,
+    conv2: Conv2d<B>,
+    bn2: Option<BatchNorm<B>>,
+}
 
+impl<B: Backend> ResidualBlock<B> {
+    fn new(device: &B::Device, num_features: usize, batch_norm: bool) -> Self {
+        let conv = |channels_in, channels_out| {
+            Conv2dConfig::new([channels_in, channels_out], [3, 3])
+                .with_padding(PaddingConfig2d::Explicit(1, 1))
+                .with_bias(!batch_norm)
+                .init(device)
+        };
 
-// class MultiresConvDecoder(nn.Module):
-//     """Decoder for multi-resolution encodings."""
+        let bn = |channels: usize| batch_norm.then(|| BatchNormConfig::new(channels).init(device));
 
-//     def __init__(
-//         self,
-//         dims_encoder: Iterable[int],
-//         dim_decoder: int,
-//     ):
-//         """Initialize multiresolution convolutional decoder.
+        Self {
+            conv1: conv(num_features, num_features),
+            bn1: bn(num_features),
+            conv2: conv(num_features, num_features),
+            bn2: bn(num_features),
+        }
+    }
 
-//         Args:
-//         ----
-//             dims_encoder: Expected dims at each level from the encoder.
-//             dim_decoder: Dim of decoder features.
+    fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let mut out = relu(x);
+        out = self.conv1.forward(out);
+        if let Some(bn1) = &self.bn1 {
+            out = bn1.forward(out);
+        }
+        out = relu(out);
+        out = self.conv2.forward(out);
+        if let Some(bn2) = &self.bn2 {
+            out = bn2.forward(out);
+        }
+        out
+    }
+}
 
-//         """
-//         super().__init__()
-//         self.dims_encoder = list(dims_encoder)
-//         self.dim_decoder = dim_decoder
-//         self.dim_out = dim_decoder
+#[derive(Module, Debug)]
+pub struct FeatureFusionBlock2d<B: Backend> {
+    resnet1: ResidualBlock<B>,
+    resnet2: ResidualBlock<B>,
+    deconv: Option<ConvTranspose2d<B>>,
+    out_conv: Conv2d<B>,
+}
 
-//         num_encoders = len(self.dims_encoder)
+impl<B: Backend> FeatureFusionBlock2d<B> {
+    pub fn new(device: &B::Device, num_features: usize, deconv: bool, batch_norm: bool) -> Self {
+        let transposed = deconv.then(|| {
+            ConvTranspose2dConfig::new([num_features, num_features], [2, 2])
+                .with_stride([2, 2])
+                .with_bias(false)
+                .init(device)
+        });
 
-//         # At the highest resolution, i.e. level 0, we apply projection w/ 1x1 convolution
-//         # when the dimensions mismatch. Otherwise we do not do anything, which is
-//         # the default behavior of monodepth.
-//         conv0 = (
-//             nn.Conv2d(self.dims_encoder[0], dim_decoder, kernel_size=1, bias=False)
-//             if self.dims_encoder[0] != dim_decoder
-//             else nn.Identity()
-//         )
+        let out_conv = Conv2dConfig::new([num_features, num_features], [1, 1])
+            .with_bias(true)
+            .init(device);
 
-//         convs = [conv0]
-//         for i in range(1, num_encoders):
-//             convs.append(
-//                 nn.Conv2d(
-//                     self.dims_encoder[i],
-//                     dim_decoder,
-//                     kernel_size=3,
-//                     stride=1,
-//                     padding=1,
-//                     bias=False,
-//                 )
-//             )
+        Self {
+            resnet1: ResidualBlock::new(device, num_features, batch_norm),
+            resnet2: ResidualBlock::new(device, num_features, batch_norm),
+            deconv: transposed,
+            out_conv,
+        }
+    }
 
-//         self.convs = nn.ModuleList(convs)
+    pub fn forward(&self, x0: Tensor<B, 4>, x1: Option<Tensor<B, 4>>) -> Tensor<B, 4> {
+        let mut x = x0;
 
-//         fusions = []
-//         for i in range(num_encoders):
-//             fusions.append(
-//                 FeatureFusionBlock2d(
-//                     num_features=dim_decoder,
-//                     deconv=(i != 0),
-//                     batch_norm=False,
-//                 )
-//             )
-//         self.fusions = nn.ModuleList(fusions)
+        if let Some(ref residual) = x1 {
+            let processed = self.resnet1.forward(residual.clone());
+            x = x + processed;
+        }
 
-//     def forward(self, encodings: torch.Tensor) -> torch.Tensor:
-//         """Decode the multi-resolution encodings."""
-//         num_levels = len(encodings)
-//         num_encoders = len(self.dims_encoder)
+        x = self.resnet2.forward(x);
 
-//         if num_levels != num_encoders:
-//             raise ValueError(
-//                 f"Got encoder output levels={num_levels}, expected levels={num_encoders+1}."
-//             )
+        if let Some(deconv) = &self.deconv {
+            x = deconv.forward(x);
+        }
 
-//         # Project features of different encoder dims to the same decoder dim.
-//         # Fuse features from the lowest resolution (num_levels-1)
-//         # to the highest (0).
-//         features = self.convs[-1](encodings[-1])
-//         lowres_features = features
-//         features = self.fusions[-1](features)
-//         for i in range(num_levels - 2, -1, -1):
-//             features_i = self.convs[i](encodings[i])
-//             features = self.fusions[i](features, features_i)
-//         return features, lowres_features
+        self.out_conv.forward(x)
+    }
+}
 
+#[derive(Module, Debug)]
+pub struct MultiresConvDecoder<B: Backend> {
+    dims_encoder: Vec<usize>,
+    pub dim_decoder: usize,
+    convs: Vec<ProjectionConv<B>>,
+    fusions: Vec<FeatureFusionBlock2d<B>>,
+}
 
-// class ResidualBlock(nn.Module):
-//     """Generic implementation of residual blocks.
+impl<B: Backend> MultiresConvDecoder<B> {
+    pub fn new(device: &B::Device, dims_encoder: Vec<usize>, dim_decoder: usize) -> Self {
+        let mut convs = Vec::with_capacity(dims_encoder.len());
 
-//     This implements a generic residual block from
-//         He et al. - Identity Mappings in Deep Residual Networks (2016),
-//         https://arxiv.org/abs/1603.05027
-//     which can be further customized via factory functions.
-//     """
+        if dims_encoder[0] != dim_decoder {
+            convs.push(ProjectionConv::new(
+                device,
+                [dims_encoder[0], dim_decoder],
+                [1, 1],
+                0,
+                false,
+            ));
+        } else {
+            convs.push(ProjectionConv::identity());
+        }
 
-//     def __init__(self, residual: nn.Module, shortcut: nn.Module | None = None) -> None:
-//         """Initialize ResidualBlock."""
-//         super().__init__()
-//         self.residual = residual
-//         self.shortcut = shortcut
+        for dim in dims_encoder.iter().skip(1) {
+            convs.push(ProjectionConv::new(
+                device,
+                [*dim, dim_decoder],
+                [3, 3],
+                1,
+                false,
+            ));
+        }
 
-//     def forward(self, x: torch.Tensor) -> torch.Tensor:
-//         """Apply residual block."""
-//         delta_x = self.residual(x)
+        let mut fusions = Vec::with_capacity(dims_encoder.len());
+        for index in 0..dims_encoder.len() {
+            fusions.push(FeatureFusionBlock2d::new(
+                device,
+                dim_decoder,
+                index != 0,
+                false,
+            ));
+        }
 
-//         if self.shortcut is not None:
-//             x = self.shortcut(x)
+        Self {
+            dims_encoder,
+            dim_decoder,
+            convs,
+            fusions,
+        }
+    }
 
-//         return x + delta_x
+    pub fn forward(&self, encodings: &[Tensor<B, 4>]) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let num_levels = encodings.len();
+        if num_levels != self.dims_encoder.len() {
+            panic!(
+                "Got encoder output levels = {num_levels}, expected {}.",
+                self.dims_encoder.len()
+            );
+        }
 
+        let mut features = self.convs[num_levels - 1].forward(encodings[num_levels - 1].clone());
+        let lowres_features = features.clone();
+        features = self.fusions[num_levels - 1].forward(features, None);
 
-// class FeatureFusionBlock2d(nn.Module):
-//     """Feature fusion for DPT."""
+        for level in (0..num_levels - 1).rev() {
+            let projected = self.convs[level].forward(encodings[level].clone());
+            features = self.fusions[level].forward(features, Some(projected));
+        }
 
-//     def __init__(
-//         self,
-//         num_features: int,
-//         deconv: bool = False,
-//         batch_norm: bool = False,
-//     ):
-//         """Initialize feature fusion block.
-
-//         Args:
-//         ----
-//             num_features: Input and output dimensions.
-//             deconv: Whether to use deconv before the final output conv.
-//             batch_norm: Whether to use batch normalization in resnet blocks.
-
-//         """
-//         super().__init__()
-
-//         self.resnet1 = self._residual_block(num_features, batch_norm)
-//         self.resnet2 = self._residual_block(num_features, batch_norm)
-
-//         self.use_deconv = deconv
-//         if deconv:
-//             self.deconv = nn.ConvTranspose2d(
-//                 in_channels=num_features,
-//                 out_channels=num_features,
-//                 kernel_size=2,
-//                 stride=2,
-//                 padding=0,
-//                 bias=False,
-//             )
-
-//         self.out_conv = nn.Conv2d(
-//             num_features,
-//             num_features,
-//             kernel_size=1,
-//             stride=1,
-//             padding=0,
-//             bias=True,
-//         )
-
-//         self.skip_add = nn.quantized.FloatFunctional()
-
-//     def forward(self, x0: torch.Tensor, x1: torch.Tensor | None = None) -> torch.Tensor:
-//         """Process and fuse input features."""
-//         x = x0
-
-//         if x1 is not None:
-//             res = self.resnet1(x1)
-//             x = self.skip_add.add(x, res)
-
-//         x = self.resnet2(x)
-
-//         if self.use_deconv:
-//             x = self.deconv(x)
-//         x = self.out_conv(x)
-
-//         return x
-
-//     @staticmethod
-//     def _residual_block(num_features: int, batch_norm: bool):
-//         """Create a residual block."""
-
-//         def _create_block(dim: int, batch_norm: bool) -> list[nn.Module]:
-//             layers = [
-//                 nn.ReLU(False),
-//                 nn.Conv2d(
-//                     num_features,
-//                     num_features,
-//                     kernel_size=3,
-//                     stride=1,
-//                     padding=1,
-//                     bias=not batch_norm,
-//                 ),
-//             ]
-//             if batch_norm:
-//                 layers.append(nn.BatchNorm2d(dim))
-//             return layers
-
-//         residual = nn.Sequential(
-//             *_create_block(dim=num_features, batch_norm=batch_norm),
-//             *_create_block(dim=num_features, batch_norm=batch_norm),
-//         )
-//         return ResidualBlock(residual)
+        (features, lowres_features)
+    }
+}
