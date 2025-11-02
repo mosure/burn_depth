@@ -28,10 +28,16 @@ exclude = [
 
 
 [features]
-default = []
+default = [
+  "test_cuda",
+  "test_wgpu_f16",
+]
 
 benchmark = ["burn/autotune", "burn/fusion"]
 import = ["bevy_args", "burn-import", "clap", "serde"]
+
+test_cuda = []
+test_wgpu_f16 = []
 
 
 [dependencies]
@@ -116,11 +122,15 @@ features = [
 
 
 [dev-dependencies]
+burn-cuda = "0.19"
 criterion = { version = "0.7", features = ["html_reports"] }
 futures-intrusive = { version = "0.5.0" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = { version = "0.4.0" }
 safetensors = "0.6"
+
+[patch.crates-io]
+cudarc = { git = "https://github.com/coreylowman/cudarc", tag = "v0.17.3" }
 
 
 [profile.dev.package."*"]
