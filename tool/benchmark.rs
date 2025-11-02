@@ -1,12 +1,13 @@
 #![recursion_limit = "256"]
 
-use burn::{backend::Wgpu, nn::interpolate::InterpolateMode, prelude::*};
+use burn::{nn::interpolate::InterpolateMode, prelude::*};
 use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use burn_cuda::Cuda;
 use half::f16;
 use std::hint::black_box;
 
-type BenchBackend = Wgpu<f16>;
+type BenchBackend = Cuda<f16>;
 
 criterion_group! {
     name = depth_pro_benchmarks;

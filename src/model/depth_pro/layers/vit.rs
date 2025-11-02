@@ -19,6 +19,7 @@ impl ViTConfig {
 }
 
 pub const DINOV2_L16_384: &str = "dinov2l16_384";
+pub const DINOV2_L16_128: &str = "dinov2l16_128";
 
 fn vit_config_from_preset(preset: &str) -> Option<ViTConfig> {
     match preset {
@@ -26,6 +27,14 @@ fn vit_config_from_preset(preset: &str) -> Option<ViTConfig> {
             in_chans: 3,
             embed_dim: 1024,
             img_size: 384,
+            patch_size: 16,
+            encoder_feature_layer_ids: vec![5, 11, 17, 23],
+            encoder_feature_dims: vec![256, 512, 1024, 1024],
+        }),
+        DINOV2_L16_128 => Some(ViTConfig {
+            in_chans: 3,
+            embed_dim: 1024,
+            img_size: 128,
             patch_size: 16,
             encoder_feature_layer_ids: vec![5, 11, 17, 23],
             encoder_feature_dims: vec![256, 512, 1024, 1024],
@@ -43,6 +52,10 @@ pub fn create_vit<B: Backend>(
 
     let vit = match preset {
         DINOV2_L16_384 => {
+            DinoVisionTransformerConfig::vitl(Some(config.img_size), Some(config.patch_size))
+                .init(device)
+        }
+        DINOV2_L16_128 => {
             DinoVisionTransformerConfig::vitl(Some(config.img_size), Some(config.patch_size))
                 .init(device)
         }

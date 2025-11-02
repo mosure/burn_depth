@@ -4,7 +4,7 @@ pub mod model;
 
 #[cfg(test)]
 mod tests {
-    use super::model::depth_pro::{DepthPro, DepthProConfig};
+    use super::model::depth_pro::{DepthPro, DepthProConfig, layers::vit::DINOV2_L16_128};
     use burn::{nn::interpolate::InterpolateMode, prelude::*};
     use burn_cuda::Cuda as CudaBackend;
     use burn_ndarray::NdArray as NdArrayBackend;
@@ -60,9 +60,21 @@ mod tests {
         Ok(<NdArrayBackend<f32> as Backend>::Device::default())
     }
 
+    fn test_config() -> DepthProConfig {
+        // Use the 128 window preset to reduce the full-resolution input (512 px) so the
+        // backend sweep stays fast while still exercising the multi-scale pipeline.
+        DepthProConfig {
+            patch_encoder_preset: DINOV2_L16_128.into(),
+            image_encoder_preset: DINOV2_L16_128.into(),
+            fov_encoder_preset: Some(DINOV2_L16_128.into()),
+            decoder_features: 64,
+            ..DepthProConfig::default()
+        }
+    }
+
     fn build_model<B: Backend>(device: &B::Device) -> DepthPro<B> {
         panic::catch_unwind(AssertUnwindSafe(|| {
-            DepthPro::<B>::new(device, DepthProConfig::default())
+            DepthPro::<B>::new(device, test_config())
         }))
         .unwrap_or_else(|_| {
             panic!(

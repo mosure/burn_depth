@@ -4,18 +4,39 @@ use burn::{
         interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode},
     },
     prelude::*,
+    tensor::{module::unfold4d, ops::UnfoldOptions},
 };
 
 use crate::model::{depth_pro::layers::vit::ViTConfig, dino::DinoVisionTransformer};
 
+#[derive(Clone)]
 struct PatchSplit<B: Backend> {
     tensor: Tensor<B, 4>,
     steps: usize,
+    patch_size: usize,
+    stride: usize,
 }
 
 impl<B: Backend> PatchSplit<B> {
-    fn new(tensor: Tensor<B, 4>, steps: usize) -> Self {
-        Self { tensor, steps }
+    fn new(tensor: Tensor<B, 4>, steps: usize, patch_size: usize, stride: usize) -> Self {
+        Self {
+            tensor,
+            steps,
+            patch_size,
+            stride,
+        }
+    }
+
+    fn feature_padding(&self, feature_patch_size: usize) -> usize {
+        if feature_patch_size == 0 || self.patch_size == 0 {
+            return 0;
+        }
+
+        let denom = self.patch_size.max(1);
+        let feature_stride = (self.stride * feature_patch_size + denom / 2) / denom;
+        feature_patch_size
+            .saturating_sub(feature_stride)
+            .saturating_div(2)
     }
 }
 
@@ -165,33 +186,42 @@ impl<B: Backend> DepthProEncoder<B> {
         let channels = dims[1];
         let image_size = dims[3];
         let patch_size = self.patch_window_size;
-        let patch_stride = (patch_size as f32 * (1.0 - overlap_ratio)) as usize;
+        let mut patch_stride =
+            ((patch_size as f32 * (1.0 - overlap_ratio)).round() as usize).max(1);
+        if patch_stride > patch_size {
+            patch_stride = patch_size;
+        }
 
         let steps = if patch_size >= image_size {
             1
         } else {
-            (((image_size - patch_size) as f32) / patch_stride as f32).ceil() as usize + 1
+            (image_size - patch_size + patch_stride - 1) / patch_stride + 1
         };
 
-        let mut patches = Vec::with_capacity(steps * steps);
-        for j in 0..steps {
-            let j0 = j * patch_stride;
-            let j1 = j0 + patch_size;
-            for i in 0..steps {
-                let i0 = i * patch_stride;
-                let i1 = i0 + patch_size;
-                let patch = x.clone().slice([0..batch, 0..channels, j0..j1, i0..i1]);
-                patches.push(patch);
-            }
-        }
+        let unfolded = unfold4d(
+            x,
+            [patch_size, patch_size],
+            UnfoldOptions::new([patch_stride, patch_stride], [0, 0], [1, 1]),
+        );
 
-        let tensor = if patches.len() == 1 {
-            patches.pop().unwrap()
-        } else {
-            Tensor::cat(patches, 0)
-        };
+        let tensor = unfolded
+            .reshape([
+                batch as i32,
+                channels as i32,
+                patch_size as i32,
+                patch_size as i32,
+                steps as i32,
+                steps as i32,
+            ])
+            .permute([0, 4, 5, 1, 2, 3])
+            .reshape([
+                (batch * steps * steps) as i32,
+                channels as i32,
+                patch_size as i32,
+                patch_size as i32,
+            ]);
 
-        PatchSplit::new(tensor, steps)
+        PatchSplit::new(tensor, steps, patch_size, patch_stride)
     }
 
     fn merge(&self, x: Tensor<B, 4>, batch_size: usize, padding: usize) -> Tensor<B, 4> {
@@ -201,53 +231,67 @@ impl<B: Backend> DepthProEncoder<B> {
         let width = dims[3];
 
         let steps = ((dims[0] / batch_size) as f64).sqrt().round() as usize;
-        let mut idx = 0;
-        let mut rows = Vec::with_capacity(steps);
+        if steps == 0 {
+            return Tensor::zeros([batch_size as i32, channels as i32, 0, 0], &x.device());
+        }
+
+        let inner_height = height.saturating_sub(2 * padding);
+        let inner_width = width.saturating_sub(2 * padding);
+        let output_height = height + (steps - 1) * inner_height;
+        let output_width = width + (steps - 1) * inner_width;
+        let mut output = Tensor::<B, 4>::zeros(
+            [
+                batch_size as i32,
+                channels as i32,
+                output_height as i32,
+                output_width as i32,
+            ],
+            &x.device(),
+        );
 
         for j in 0..steps {
-            let mut cols = Vec::with_capacity(steps);
             for i in 0..steps {
+                let idx = j * steps + i;
                 let start = batch_size * idx;
-                let end = batch_size * (idx + 1);
-                idx += 1;
+                let end = start + batch_size;
 
                 let mut patch = x
                     .clone()
                     .slice([start..end, 0..channels, 0..height, 0..width]);
 
-                if j != 0 {
-                    let dims: [usize; 4] = patch.shape().dims();
-                    patch = patch.slice([0..batch_size, 0..dims[1], padding..dims[2], 0..dims[3]]);
-                }
-                if i != 0 {
-                    let dims: [usize; 4] = patch.shape().dims();
-                    patch = patch.slice([0..batch_size, 0..dims[1], 0..dims[2], padding..dims[3]]);
-                }
-                if j != steps - 1 {
-                    let dims: [usize; 4] = patch.shape().dims();
+                let top_trim = if j == 0 { 0 } else { padding };
+                let bottom_trim = if j == steps - 1 { 0 } else { padding };
+                let left_trim = if i == 0 { 0 } else { padding };
+                let right_trim = if i == steps - 1 { 0 } else { padding };
+
+                let bottom_index = height - bottom_trim;
+                let right_index = width - right_trim;
+
+                if top_trim != 0 || bottom_trim != 0 || left_trim != 0 || right_trim != 0 {
                     patch = patch.slice([
                         0..batch_size,
-                        0..dims[1],
-                        0..(dims[2] - padding),
-                        0..dims[3],
-                    ]);
-                }
-                if i != steps - 1 {
-                    let dims: [usize; 4] = patch.shape().dims();
-                    patch = patch.slice([
-                        0..batch_size,
-                        0..dims[1],
-                        0..dims[2],
-                        0..(dims[3] - padding),
+                        0..channels,
+                        top_trim..bottom_index,
+                        left_trim..right_index,
                     ]);
                 }
 
-                cols.push(patch);
+                let patch_dims: [usize; 4] = patch.shape().dims();
+                let slice_height = patch_dims[2];
+                let slice_width = patch_dims[3];
+                debug_assert!(slice_height > 0 && slice_width > 0);
+
+                let base_y = j * inner_height + if j == 0 { 0 } else { padding };
+                let base_x = i * inner_width + if i == 0 { 0 } else { padding };
+                let y1 = base_y + slice_height;
+                let x1 = base_x + slice_width;
+
+                output = output
+                    .slice_assign([0..batch_size, 0..channels, base_y..y1, base_x..x1], patch);
             }
-            rows.push(Tensor::cat(cols, 3));
         }
 
-        Tensor::cat(rows, 2)
+        output
     }
 
     fn reshape_feature(
@@ -283,7 +327,8 @@ impl<B: Backend> DepthProEncoder<B> {
 
         let x0_split = self.split(x0, 0.25);
         let x1_split = self.split(x1, 0.5);
-        let x2_split = PatchSplit::new(x2, 1);
+        let x2_dims: [usize; 4] = x2.shape().dims();
+        let x2_split = PatchSplit::new(x2, 1, x2_dims[2], x2_dims[2]);
 
         let x_pyramid_patches = Tensor::cat(
             vec![
@@ -335,11 +380,14 @@ impl<B: Backend> DepthProEncoder<B> {
             enc.slice([0..high_count, 0..dims[1], 0..dims[2], 0..dims[3]])
         };
 
-        let x_latent0_features = self.merge(latent0_encodings, batch_size, 3);
-        let x_latent1_features = self.merge(latent1_encodings, batch_size, 3);
+        let high_padding = x0_split.feature_padding(self.out_size);
+        let mid_padding = x1_split.feature_padding(self.out_size);
 
-        let x0_features = self.merge(x0_encodings, batch_size, 3);
-        let x1_features = self.merge(x1_encodings, batch_size, 6);
+        let x_latent0_features = self.merge(latent0_encodings, batch_size, high_padding);
+        let x_latent1_features = self.merge(latent1_encodings, batch_size, high_padding);
+
+        let x0_features = self.merge(x0_encodings, batch_size, high_padding);
+        let x1_features = self.merge(x1_encodings, batch_size, mid_padding);
         let x2_features = x2_encodings;
 
         let x_global_features = self.image_encoder.forward(x2_split.tensor.clone(), None);
@@ -367,5 +415,130 @@ impl<B: Backend> DepthProEncoder<B> {
             x1_features,
             x_global_features,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::depth_pro::layers::vit::{create_vit, DINOV2_L16_128};
+    use burn_ndarray::NdArray;
+
+    type TestBackend = NdArray<f32>;
+
+    fn build_encoder(
+        device: &<TestBackend as Backend>::Device,
+    ) -> (DepthProEncoder<TestBackend>, ViTConfig) {
+        let (patch_encoder, patch_config) = create_vit::<TestBackend>(device, DINOV2_L16_128);
+        let (image_encoder, _) = create_vit::<TestBackend>(device, DINOV2_L16_128);
+
+        let encoder = DepthProEncoder::new(
+            device,
+            patch_config.encoder_feature_dims.clone(),
+            patch_encoder,
+            &patch_config,
+            image_encoder,
+            patch_config.encoder_feature_layer_ids.clone(),
+            64,
+        );
+
+        (encoder, patch_config)
+    }
+
+    fn make_ordered_input(
+        device: &<TestBackend as Backend>::Device,
+        channels: usize,
+        size: usize,
+    ) -> Tensor<TestBackend, 4> {
+        let total = channels * size * size;
+        let values: Vec<f32> = (0..total).map(|idx| idx as f32).collect();
+
+        Tensor::<TestBackend, 1>::from_floats(values.as_slice(), device)
+            .reshape([1, channels, size, size])
+    }
+
+    #[test]
+    fn split_merge_roundtrip_without_overlap() {
+        let device = <TestBackend as Backend>::Device::default();
+        let (encoder, patch_config) = build_encoder(&device);
+        let image_size = encoder.img_size();
+        let input = make_ordered_input(&device, 3, image_size);
+        let baseline = input.clone();
+
+        let split = encoder.split(input.clone(), 0.0);
+        assert_eq!(split.steps * split.steps, 16);
+        let batch_size = baseline.shape().dims::<4>()[0];
+        let padding = split.feature_padding(patch_config.grid_size());
+        let merged = encoder.merge(split.tensor, batch_size, padding);
+
+        assert!(
+            merged.clone().all_close(baseline, Some(1e-5), Some(1e-5)),
+            "split/merge without overlap should reconstruct the input"
+        );
+    }
+
+    #[test]
+    fn merge_overlapping_layout_matches_expected() {
+        let device = <TestBackend as Backend>::Device::default();
+        let (encoder, _config) = build_encoder(&device);
+
+        let batch_size = 1;
+        let channels = 2;
+        let feature_size = 8;
+        let steps = 5;
+        let padding = 1;
+        let patch_count = batch_size * steps * steps;
+        let patch_volume = channels * feature_size * feature_size;
+
+        let patch_values: Vec<f32> = (0..patch_count)
+            .flat_map(|patch_idx| std::iter::repeat(patch_idx as f32).take(patch_volume))
+            .collect();
+
+        let patches = Tensor::<TestBackend, 1>::from_floats(patch_values.as_slice(), &device)
+            .reshape([patch_count, channels, feature_size, feature_size]);
+        let merged = encoder.merge(patches, batch_size, padding);
+        let dims: [usize; 4] = merged.shape().dims();
+        let output_height = dims[2];
+        let output_width = dims[3];
+
+        let mut expected = vec![-1f32; batch_size * channels * output_height * output_width];
+        for batch in 0..batch_size {
+            for j in 0..steps {
+                for i in 0..steps {
+                    let patch_idx = batch_size * (j * steps + i) + batch;
+                    let top_trim = if j == 0 { 0 } else { padding };
+                    let bottom_trim = if j == steps - 1 { 0 } else { padding };
+                    let left_trim = if i == 0 { 0 } else { padding };
+                    let right_trim = if i == steps - 1 { 0 } else { padding };
+
+                    let slice_height = feature_size - top_trim - bottom_trim;
+                    let slice_width = feature_size - left_trim - right_trim;
+                    let base_y = j * (feature_size - 2 * padding) + if j == 0 { 0 } else { padding };
+                    let base_x = i * (feature_size - 2 * padding) + if i == 0 { 0 } else { padding };
+
+                    for channel in 0..channels {
+                        for dy in 0..slice_height {
+                            for dx in 0..slice_width {
+                                let y = base_y + dy;
+                                let x = base_x + dx;
+                                let offset = ((((batch * channels) + channel) * output_height) + y)
+                                    * output_width
+                                    + x;
+                                expected[offset] = patch_idx as f32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let merged_vec = merged.into_data().convert::<f32>().to_vec::<f32>().unwrap();
+        assert_eq!(merged_vec.len(), expected.len());
+        for (observed, reference) in merged_vec.iter().zip(expected.iter()) {
+            assert!(
+                (*observed - *reference).abs() < 1e-5,
+                "merge produced {observed} but expected {reference}"
+            );
+        }
     }
 }
