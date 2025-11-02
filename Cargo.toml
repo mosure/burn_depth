@@ -135,6 +135,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "import"
 path = "tool/import.rs"
+required-features = ["import"]
 
 [[example]]
 name = "correctness"
@@ -144,3 +145,4 @@ path = "example/correctness.rs"
 name = "depth_pro"
 path = "tool/benchmark.rs"
 harness = false
+required-features = ["benchmark"]

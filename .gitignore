@@ -6,7 +6,9 @@ Cargo.lock
 **/*.rs.bk
 *.pdb
 
+# Allow Python files in tool directory
 *.py
+!tool/*.py
 
 *.ply
 *.gcloud

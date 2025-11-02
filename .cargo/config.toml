@@ -1,0 +1,3 @@
+[build]
+# Increase parallelism during builds
+# jobs = 4
