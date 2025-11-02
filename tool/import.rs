@@ -1,41 +1,57 @@
-use std::path::PathBuf;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use burn::{
     module::Module,
-    record::serde::{
-        data::{NestedValue, remap, unflatten},
-        de::Deserializer,
-        ser::Serializer,
-    },
-    record::{FullPrecisionSettings, NamedMpkFileRecorder, Record, Recorder},
+    record::{FullPrecisionSettings, NamedMpkFileRecorder, Record},
 };
 use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
-use burn_import::common::{
-    adapter::PyTorchAdapter,
-    tensor_snapshot::{TensorSnapshotWrapper, print_debug_info},
+use burn_store::{
+    ApplyResult, ModuleSnapshot,
+    pytorch::{PytorchReader, PytorchStore},
 };
-use burn_store::pytorch::PytorchReader;
-use regex::Regex;
-use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
 
 type Backend = burn_ndarray::NdArray<f32>;
 
+const CHECKPOINT_PATH: &str = "assets/model/depth_pro.pt";
+const OUTPUT_PATH: &str = "assets/model/depth_pro.mpk";
+const TEMPLATE_PATH: &str = "assets/model/depth_pro_template_paths.txt";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = <Backend as burn::tensor::backend::Backend>::Device::default();
-    let model = DepthPro::<Backend>::new(&device, DepthProConfig::default());
+    let mut model = DepthPro::<Backend>::new(&device, DepthProConfig::default());
 
     if std::env::var("EXPORT_TEMPLATE").is_ok() {
         dump_template(model.clone())?;
         return Ok(());
     }
 
-    let default_record = model.clone().into_record();
-    let record = load_torch_checkpoint(&device, &default_record)?;
-    let model = model.load_record(record);
+    let debug = std::env::var("IMPORT_DEBUG").is_ok();
+    let checkpoint_path = PathBuf::from(CHECKPOINT_PATH);
+    if !checkpoint_path.exists() {
+        return Err(format!(
+            "PyTorch checkpoint `{}` not found.",
+            checkpoint_path.display()
+        )
+        .into());
+    }
+    if debug {
+        debug_print_checkpoint(&checkpoint_path)?;
+        debug_print_model_paths(&model);
+    }
+    let mut store = build_store(&checkpoint_path);
 
-    let output_path = PathBuf::from("assets/model/depth_pro.mpk");
+    println!("Loading checkpoint {}", checkpoint_path.display());
+    let result = model
+        .load_from(&mut store)
+        .map_err(|err| format!("Failed to apply PyTorch checkpoint: {err}"))?;
+
+    report_apply_result(&result, debug)?;
+
+    let output_path = PathBuf::from(OUTPUT_PATH);
     model.clone().save_file(
         output_path.clone(),
         &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
@@ -54,17 +70,13 @@ fn dump_template(model: DepthPro<Backend>) -> Result<(), Box<dyn std::error::Err
     print_type_of(&record, "Record type");
     print_type_of(&record.encoder, "Encoder record type");
     print_type_of(&record.encoder.patch_encoder, "Patch encoder record type");
-    let item = record.into_item::<FullPrecisionSettings>();
-    let mut value = serde_json::to_value(&item)?;
+    let mut value = serde_json::to_value(&record.into_item::<FullPrecisionSettings>())?;
     prune_bytes(&mut value);
 
     let mut paths = Vec::new();
     collect_paths(&value, String::new(), &mut paths);
-    std::fs::write(
-        "assets/model/depth_pro_template_paths.txt",
-        paths.join("\n"),
-    )?;
-    println!("Wrote template paths to assets/model/depth_pro_template_paths.txt");
+    std::fs::write(TEMPLATE_PATH, paths.join("\n"))?;
+    println!("Wrote template paths to {}", TEMPLATE_PATH);
     Ok(())
 }
 
@@ -112,123 +124,278 @@ fn collect_paths(value: &Value, prefix: String, out: &mut Vec<String>) {
     }
 }
 
-fn load_torch_checkpoint(
-    device: &<Backend as burn::tensor::backend::Backend>::Device,
-    default_record: &<DepthPro<Backend> as Module<Backend>>::Record,
-) -> Result<<DepthPro<Backend> as Module<Backend>>::Record, Box<dyn std::error::Error>> {
-    let path = PathBuf::from("assets/model/depth_pro.pt");
+fn build_store(path: &Path) -> PytorchStore {
+    let mut store = PytorchStore::from_file(path);
+    for &(from, to) in key_remap_rules() {
+        store = store.with_key_remapping(from, to);
+    }
+    store.allow_partial(true).validate(true)
+}
 
-    let reader = PytorchReader::new(&path)?;
-    let tensors: HashMap<String, TensorSnapshotWrapper> = reader
-        .into_tensors()
-        .into_iter()
-        .map(|(key, snapshot)| (key, TensorSnapshotWrapper(snapshot)))
+fn key_remap_rules() -> &'static [(&'static str, &'static str)] {
+    &[
+        (
+            r"^(encoder\.(?:patch_encoder|image_encoder)(?:\.blocks\.\d+)?\.norm\d?)\.weight$",
+            "$1.gamma",
+        ),
+        (
+            r"^(encoder\.(?:patch_encoder|image_encoder)(?:\.blocks\.\d+)?\.norm\d?)\.bias$",
+            "$1.beta",
+        ),
+        (
+            r"^(fov\.encoder(?:\.0)?(?:\.blocks\.\d+)?\.norm\d?)\.weight$",
+            "$1.gamma",
+        ),
+        (
+            r"^(fov\.encoder(?:\.0)?(?:\.blocks\.\d+)?\.norm\d?)\.bias$",
+            "$1.beta",
+        ),
+        (
+            r"^encoder\.upsample([0-2])\.0\.(weight|bias)$",
+            "encoder.upsample$1.projection.$2",
+        ),
+        (
+            r"^encoder\.upsample([0-2])\.1\.(weight|bias)$",
+            "encoder.upsample$1.upsample.0.$2",
+        ),
+        (
+            r"^encoder\.upsample_latent([0-1])\.0\.(weight|bias)$",
+            "encoder.upsample_latent$1.projection.$2",
+        ),
+        (
+            r"^encoder\.upsample_latent([0-1])\.1\.(weight|bias)$",
+            "encoder.upsample_latent$1.upsample.0.$2",
+        ),
+        (
+            r"^encoder\.upsample_latent([0-1])\.2\.(weight|bias)$",
+            "encoder.upsample_latent$1.upsample.1.$2",
+        ),
+        (
+            r"^encoder\.upsample_latent([0-1])\.3\.(weight|bias)$",
+            "encoder.upsample_latent$1.upsample.2.$2",
+        ),
+        (
+            r"^fov\.downsample\.(\d+)\.(weight|bias)$",
+            "fov.downsample_blocks.$1.conv.$2",
+        ),
+        (
+            r"^decoder\.convs\.(\d+)\.(weight|bias)$",
+            "decoder.convs.$1.conv.$2",
+        ),
+        (
+            r"^decoder\.fusions\.(\d+)\.resnet([12])\.residual\.1\.(weight|bias)$",
+            "decoder.fusions.$1.resnet$2.conv1.$3",
+        ),
+        (
+            r"^decoder\.fusions\.(\d+)\.resnet([12])\.residual\.3\.(weight|bias)$",
+            "decoder.fusions.$1.resnet$2.conv2.$3",
+        ),
+        (r"^fov\.encoder\.0\.", "fov.encoder."),
+        (r"^fov\.encoder\.1\.(weight|bias)$", "fov.encoder_proj.$1"),
+        (r"^head\.0\.(weight|bias)$", "head.conv0.$1"),
+        (r"^head\.1\.(weight|bias)$", "head.deconv.$1"),
+        (r"^head\.2\.(weight|bias)$", "head.conv1.$1"),
+        (r"^head\.4\.(weight|bias)$", "head.conv_out.$1"),
+        (
+            r"^fov\.head\.0\.(weight|bias)$",
+            "fov.head_blocks.0.conv.$1",
+        ),
+        (
+            r"^fov\.head\.2\.(weight|bias)$",
+            "fov.head_blocks.1.conv.$1",
+        ),
+        (
+            r"^fov\.head\.4\.(weight|bias)$",
+            "fov.head_blocks.2.conv.$1",
+        ),
+    ]
+}
+
+fn allowed_missing() -> &'static [&'static str] {
+    &[
+        "encoder.patch_encoder.mask_token",
+        "encoder.image_encoder.mask_token",
+        "fov.encoder.mask_token",
+    ]
+}
+
+fn report_apply_result(
+    result: &ApplyResult,
+    debug: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !result.errors.is_empty() {
+        println!(
+            "Encountered {} error(s) while applying tensors:",
+            result.errors.len()
+        );
+        for error in &result.errors {
+            println!("  - {}", error);
+        }
+        return Err("Failed to import checkpoint; see errors above.".into());
+    }
+
+    let allowed: HashSet<&str> = allowed_missing().iter().copied().collect();
+    let unexpected: Vec<&String> = result
+        .missing
+        .iter()
+        .filter(|key| !allowed.contains(key.as_str()))
         .collect();
 
-    let remap_rules = key_remap_rules()?;
-    let (tensors, remapped_keys) = remap(tensors, remap_rules);
-
-    if std::env::var("IMPORT_DEBUG").is_ok() {
-        print_debug_info(&tensors, remapped_keys);
-    }
-
-    let mut nested = unflatten::<FullPrecisionSettings, _>(tensors)?;
-    ensure_mask_tokens(&mut nested, default_record)?;
-
-    let deserializer =
-        Deserializer::<PyTorchAdapter<FullPrecisionSettings, Backend>>::new(nested, true);
-    let record = <DepthPro<Backend> as Module<Backend>>::Record::deserialize(deserializer)?;
-
-    println!("Successfully loaded PyTorch checkpoint.");
-    Ok(record)
-}
-fn key_remap_rules() -> Result<Vec<(Regex, String)>, regex::Error> {
-    Ok(vec![
-        (
-            Regex::new(r"^decoder\.convs\.(\d+)\.(weight|bias)$")?,
-            "decoder.convs.$1.conv.$2".into(),
-        ),
-        (
-            Regex::new(r"^decoder\.fusions\.(\d+)\.resnet([12])\.residual\.1\.(weight|bias)$")?,
-            "decoder.fusions.$1.resnet$2.conv1.$3".into(),
-        ),
-        (
-            Regex::new(r"^decoder\.fusions\.(\d+)\.resnet([12])\.residual\.3\.(weight|bias)$")?,
-            "decoder.fusions.$1.resnet$2.conv2.$3".into(),
-        ),
-        (
-            Regex::new(r"^head\.0\.(weight|bias)$")?,
-            "head.conv0.$1".into(),
-        ),
-        (
-            Regex::new(r"^head\.1\.(weight|bias)$")?,
-            "head.deconv.$1".into(),
-        ),
-        (
-            Regex::new(r"^head\.2\.(weight|bias)$")?,
-            "head.conv1.$1".into(),
-        ),
-        (
-            Regex::new(r"^head\.4\.(weight|bias)$")?,
-            "head.conv_out.$1".into(),
-        ),
-        (
-            Regex::new(r"^fov\.head\.(\d+)\.(weight|bias)$")?,
-            "fov.head_blocks.$1.conv.$2".into(),
-        ),
-    ])
-}
-
-fn serialize_to_nested<T: Serialize>(value: &T) -> Result<NestedValue, Box<dyn std::error::Error>> {
-    Ok(value.serialize(Serializer::new())?)
-}
-
-fn ensure_mask_tokens(
-    nested: &mut NestedValue,
-    default_record: &<DepthPro<Backend> as Module<Backend>>::Record,
-) -> Result<(), Box<dyn std::error::Error>> {
-    insert_nested(
-        nested,
-        &["encoder", "patch_encoder", "mask_token"],
-        serialize_to_nested(&default_record.encoder.patch_encoder.mask_token)?,
-    );
-
-    insert_nested(
-        nested,
-        &["encoder", "image_encoder", "mask_token"],
-        serialize_to_nested(&default_record.encoder.image_encoder.mask_token)?,
-    );
-
-    if let Some(fov_record) = default_record.fov.as_ref() {
-        insert_nested(
-            nested,
-            &["fov", "encoder", "mask_token"],
-            serialize_to_nested(&fov_record.encoder.mask_token)?,
+    if !unexpected.is_empty() {
+        println!(
+            "Missing tensors not covered by the importer allowlist ({}):",
+            unexpected.len()
         );
+        for key in &unexpected {
+            println!("  - {}", key);
+        }
+        return Err("Unexpected missing tensors encountered while importing.".into());
     }
+
+    if !result.missing.is_empty() {
+        println!(
+            "Info: {} tensor(s) absent from checkpoint; default initialization retained.",
+            result.missing.len()
+        );
+        if debug {
+            for key in &result.missing {
+                println!("  - {}", key);
+            }
+        }
+    }
+
+    if !result.unused.is_empty() {
+        println!(
+            "Warning: {} tensor(s) from checkpoint were unused.",
+            result.unused.len()
+        );
+        if debug {
+            for key in &result.unused {
+                println!("  - {}", key);
+            }
+        }
+    }
+
+    if debug && !result.skipped.is_empty() {
+        println!("Skipped {} tensor(s) due to filters:", result.skipped.len());
+        for key in &result.skipped {
+            println!("  - {}", key);
+        }
+    }
+
+    println!(
+        "Applied {} tensors ({} skipped, {} missing, {} unused).",
+        result.applied.len(),
+        result.skipped.len(),
+        result.missing.len(),
+        result.unused.len()
+    );
 
     Ok(())
 }
 
-fn insert_nested(target: &mut NestedValue, path: &[&str], value: NestedValue) {
-    match target {
-        NestedValue::Map(map) => {
-            if path.is_empty() {
-                *target = value;
-            } else {
-                let entry = map
-                    .entry(path[0].to_string())
-                    .or_insert_with(|| NestedValue::Map(HashMap::new()));
-                if path.len() == 1 {
-                    *entry = value;
-                } else {
-                    insert_nested(entry, &path[1..], value.clone());
-                }
-            }
-        }
-        _ => {
-            *target = NestedValue::Map(HashMap::new());
-            insert_nested(target, path, value);
+fn debug_print_model_paths(model: &DepthPro<Backend>) {
+    let mut paths: Vec<String> = model
+        .collect(None, None)
+        .into_iter()
+        .map(|snapshot| snapshot.full_path())
+        .filter(|path| path.starts_with("fov"))
+        .collect();
+
+    paths.sort();
+    if paths.is_empty() {
+        println!("Debug: model has no `fov` tensors.");
+    } else {
+        println!("Debug: model tensor paths starting with `fov`:");
+        for path in paths {
+            println!("  {path}");
         }
     }
+}
+
+fn debug_print_checkpoint(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let tensors = PytorchReader::new(path)?.into_tensors();
+
+    let mut head_entries: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("fov.head."))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    head_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if head_entries.is_empty() {
+        println!("Debug: no `fov.head` tensors found in checkpoint.");
+    } else {
+        println!("Debug: `fov.head` tensor shapes:");
+        for (key, shape) in &head_entries {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut patch_norm: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("encoder.patch_encoder") && key.contains(".norm"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    patch_norm.sort_by(|a, b| a.0.cmp(&b.0));
+    if !patch_norm.is_empty() {
+        println!("Debug: sample `encoder.patch_encoder` gamma/beta tensors (first 10):");
+        for (key, shape) in patch_norm.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut image_norm: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("encoder.image_encoder") && key.contains(".norm"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    image_norm.sort_by(|a, b| a.0.cmp(&b.0));
+    if !image_norm.is_empty() {
+        println!("Debug: sample `encoder.image_encoder` gamma/beta tensors (first 10):");
+        for (key, shape) in image_norm.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut fov_norm: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("fov.encoder") && key.contains(".norm"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    fov_norm.sort_by(|a, b| a.0.cmp(&b.0));
+    if !fov_norm.is_empty() {
+        println!("Debug: sample `fov.encoder` norm tensors (first 10):");
+        for (key, shape) in fov_norm.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut upsample_entries: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("encoder.upsample"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    upsample_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    if !upsample_entries.is_empty() {
+        println!("Debug: sample `encoder.upsample` tensors (first 10):");
+        for (key, shape) in upsample_entries.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut fov_downsample: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("fov.downsample"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    fov_downsample.sort_by(|a, b| a.0.cmp(&b.0));
+    if !fov_downsample.is_empty() {
+        println!("Debug: sample `fov.downsample` tensors:");
+        for (key, shape) in fov_downsample.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    Ok(())
 }
