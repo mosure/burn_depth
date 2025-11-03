@@ -17,7 +17,7 @@ pub mod layers {
 use burn::tensor::activation::relu;
 use layers::{
     decoder::MultiresConvDecoder,
-    encoder::DepthProEncoder,
+    encoder::{DepthProEncoder, EncoderDebug},
     fov::FOVNetwork,
     vit::{DINOV2_L16_384, create_vit},
 };
@@ -66,6 +66,7 @@ impl<B: Backend> DepthHead<B> {
             .init(device);
         let deconv = ConvTranspose2dConfig::new([dim_decoder / 2, dim_decoder / 2], [2, 2])
             .with_stride([2, 2])
+            .with_bias(true)
             .init(device);
         let conv1 = Conv2dConfig::new([dim_decoder / 2, last_dims.0], [3, 3])
             .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
@@ -88,11 +89,16 @@ impl<B: Backend> DepthHead<B> {
     }
 
     fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
-        let x = relu(self.conv0.forward(x));
+        let x = self.conv0.forward(x);
         let x = self.deconv.forward(x);
-        let x = relu(self.conv1.forward(x));
+        let x = self.conv1.forward(x);
+        let x = relu(x);
         let x = self.conv_out.forward(x);
         relu(x)
+    }
+
+    fn fix_conv_transpose_weights(&mut self) {
+        maybe_fix_conv_transpose2d(&mut self.deconv);
     }
 }
 
@@ -107,6 +113,15 @@ pub struct DepthPro<B: Backend> {
 pub struct DepthProInference<B: Backend> {
     pub depth: Tensor<B, 3>,
     pub focallength_px: Tensor<B, 1>,
+}
+
+pub struct HeadDebug<B: Backend> {
+    pub conv0: Tensor<B, 4>,
+    pub deconv: Tensor<B, 4>,
+    pub conv1: Tensor<B, 4>,
+    pub relu: Tensor<B, 4>,
+    pub pre_out: Tensor<B, 4>,
+    pub canonical: Tensor<B, 4>,
 }
 
 impl<B: Backend> DepthPro<B> {
@@ -149,9 +164,42 @@ impl<B: Backend> DepthPro<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 4>, Option<Tensor<B, 1>>) {
+    fn forward_internal(
+        &self,
+        x: Tensor<B, 4>,
+    ) -> (
+        Tensor<B, 4>,
+        Tensor<B, 4>,
+        Tensor<B, 4>,
+        Vec<Tensor<B, 4>>,
+        Option<Tensor<B, 1>>,
+    ) {
         let encodings = self.encoder.forward(x.clone());
-        let (features, lowres_features) = self.decoder.forward(&encodings);
+        let (features, lowres_features, fusion_outputs) =
+            self.decoder.forward_with_debug(&encodings);
+        let decoder_features = features.clone();
+        let decoder_lowres_features = lowres_features.clone();
+        if cfg!(debug_assertions) {
+            if let Ok(stats) = features
+                .clone()
+                .into_data()
+                .convert::<f32>()
+                .to_vec::<f32>()
+            {
+                let mut min_v = f32::INFINITY;
+                let mut max_v = f32::NEG_INFINITY;
+                let mut sum_v = 0.0f32;
+                for value in &stats {
+                    min_v = min_v.min(*value);
+                    max_v = max_v.max(*value);
+                    sum_v += *value;
+                }
+                let mean_v = sum_v / stats.len() as f32;
+                println!(
+                    "Burn decoder feature stats: min={min_v:.6}, max={max_v:.6}, mean={mean_v:.6}"
+                );
+            }
+        }
         let canonical_inverse_depth = self.head.forward(features);
 
         let fov = self.fov.as_ref().map(|fov| {
@@ -161,11 +209,76 @@ impl<B: Backend> DepthPro<B> {
             fov_tensor.reshape([batch as i32])
         });
 
-        (canonical_inverse_depth, fov)
+        (
+            canonical_inverse_depth,
+            decoder_features,
+            decoder_lowres_features,
+            fusion_outputs,
+            fov,
+        )
+    }
+
+    pub fn fix_conv_transpose_weights(&mut self) {
+        self.decoder.fix_conv_transpose_weights();
+        self.head.fix_conv_transpose_weights();
+        if let Some(fov) = self.fov.as_mut() {
+            fov.fix_conv_transpose_weights();
+        }
+    }
+
+    pub fn head_debug(&self, feature: Tensor<B, 4>) -> HeadDebug<B> {
+        let conv0 = self.head.conv0.forward(feature);
+        let deconv = self.head.deconv.forward(conv0.clone());
+        let conv1 = self.head.conv1.forward(deconv.clone());
+        let relu_out = relu(conv1.clone());
+        let pre_out = self.head.conv_out.forward(relu_out.clone());
+        let canonical = relu(pre_out.clone());
+
+        HeadDebug {
+            conv0,
+            deconv,
+            conv1,
+            relu: relu_out,
+            pre_out,
+            canonical,
+        }
+    }
+
+    pub fn forward(&self, x: Tensor<B, 4>) -> (Tensor<B, 4>, Option<Tensor<B, 1>>) {
+        let (canonical, _, _, _, fov) = self.forward_internal(x);
+        (canonical, fov)
+    }
+
+    pub fn forward_with_decoder(
+        &self,
+        x: Tensor<B, 4>,
+    ) -> (
+        Tensor<B, 4>,
+        Tensor<B, 4>,
+        Tensor<B, 4>,
+        Vec<Tensor<B, 4>>,
+        Option<Tensor<B, 1>>,
+    ) {
+        self.forward_internal(x)
+    }
+
+    pub fn decoder_from_features(
+        &self,
+        features: &[Tensor<B, 4>],
+    ) -> (Tensor<B, 4>, Tensor<B, 4>, Vec<Tensor<B, 4>>) {
+        self.decoder.forward_with_debug(features)
     }
 
     pub fn img_size(&self) -> usize {
         self.encoder.img_size()
+    }
+
+    pub fn encoder_forward_debug(&self, x: Tensor<B, 4>) -> EncoderDebug<B> {
+        self.encoder.forward_with_debug(x)
+    }
+
+    pub fn encoder_features(&self, x: Tensor<B, 4>) -> Vec<Tensor<B, 4>> {
+        self.encoder.forward(x)
     }
 
     pub fn infer(
@@ -224,5 +337,22 @@ impl<B: Backend> DepthPro<B> {
             depth,
             focallength_px: focal_px.reshape([batch as i32]),
         }
+    }
+}
+
+pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<B>) {
+    let weight = conv.weight.val();
+    let dims: [usize; 4] = weight.shape().dims();
+    let expected_in = conv.channels[0];
+    let expected_out = conv.channels[1] / conv.groups;
+
+    if dims[0] == expected_in && dims[1] == expected_out {
+        // Already in Burn layout.
+        return;
+    }
+
+    if dims[0] == expected_out && dims[1] == expected_in {
+        let permuted = weight.swap_dims(0, 1);
+        conv.weight = Param::from_tensor(permuted);
     }
 }

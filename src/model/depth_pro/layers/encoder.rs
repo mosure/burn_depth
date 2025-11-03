@@ -4,7 +4,6 @@ use burn::{
         interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode},
     },
     prelude::*,
-    tensor::{module::unfold4d, ops::UnfoldOptions},
 };
 
 use crate::model::{depth_pro::layers::vit::ViTConfig, dino::DinoVisionTransformer};
@@ -106,6 +105,22 @@ pub struct DepthProEncoder<B: Backend> {
     quarter_downsample: Interpolate2d,
 }
 
+pub struct EncoderDebug<B: Backend> {
+    pub features: Vec<Tensor<B, 4>>,
+    pub latent0: Tensor<B, 4>,
+    pub latent1: Tensor<B, 4>,
+    pub latent0_tokens: Tensor<B, 4>,
+    pub latent1_tokens: Tensor<B, 4>,
+    pub latent0_merge_input: Tensor<B, 4>,
+    pub latent1_merge_input: Tensor<B, 4>,
+    pub x0_tokens: Tensor<B, 4>,
+    pub x1_tokens: Tensor<B, 4>,
+    pub x2_tokens: Tensor<B, 4>,
+    pub merged_x0: Tensor<B, 4>,
+    pub merged_x1: Tensor<B, 4>,
+    pub merged_x2: Tensor<B, 4>,
+}
+
 impl<B: Backend> DepthProEncoder<B> {
     pub fn new(
         device: &B::Device,
@@ -187,7 +202,7 @@ impl<B: Backend> DepthProEncoder<B> {
         let image_size = dims[3];
         let patch_size = self.patch_window_size;
         let mut patch_stride =
-            ((patch_size as f32 * (1.0 - overlap_ratio)).round() as usize).max(1);
+            ((patch_size as f32 * (1.0 - overlap_ratio)).floor() as usize).max(1);
         if patch_stride > patch_size {
             patch_stride = patch_size;
         }
@@ -198,28 +213,28 @@ impl<B: Backend> DepthProEncoder<B> {
             (image_size - patch_size + patch_stride - 1) / patch_stride + 1
         };
 
-        let unfolded = unfold4d(
-            x,
-            [patch_size, patch_size],
-            UnfoldOptions::new([patch_stride, patch_stride], [0, 0], [1, 1]),
-        );
+        let mut patches = Vec::with_capacity(steps * steps);
+        for j in 0..steps {
+            let j0 = j * patch_stride;
+            let j1 = j0 + patch_size;
+            for i in 0..steps {
+                let i0 = i * patch_stride;
+                let i1 = i0 + patch_size;
 
-        let tensor = unfolded
-            .reshape([
-                batch as i32,
-                channels as i32,
-                patch_size as i32,
-                patch_size as i32,
-                steps as i32,
-                steps as i32,
-            ])
-            .permute([0, 4, 5, 1, 2, 3])
-            .reshape([
-                (batch * steps * steps) as i32,
-                channels as i32,
-                patch_size as i32,
-                patch_size as i32,
-            ]);
+                patches.push(
+                    x.clone()
+                        .slice([0..batch, 0..channels, j0..j1, i0..i1])
+                        .reshape([
+                            (batch) as i32,
+                            channels as i32,
+                            patch_size as i32,
+                            patch_size as i32,
+                        ]),
+                );
+            }
+        }
+
+        let tensor = Tensor::cat(patches, 0);
 
         PatchSplit::new(tensor, steps, patch_size, patch_stride)
     }
@@ -297,7 +312,7 @@ impl<B: Backend> DepthProEncoder<B> {
             .permute([0, 3, 1, 2])
     }
 
-    pub fn forward(&self, x: Tensor<B, 4>) -> Vec<Tensor<B, 4>> {
+    pub fn forward_with_debug(&self, x: Tensor<B, 4>) -> EncoderDebug<B> {
         let dims_root: [usize; 4] = x.shape().dims();
         let batch_size = dims_root[0];
 
@@ -345,27 +360,42 @@ impl<B: Backend> DepthProEncoder<B> {
         let high_steps = x0_split.steps * x0_split.steps;
         let high_count = batch_size * high_steps;
 
+        let latent0_merge_input =
+            self.reshape_feature(hook_tokens[0].clone(), self.out_size, self.out_size, 1);
+        let latent1_merge_input =
+            self.reshape_feature(hook_tokens[1].clone(), self.out_size, self.out_size, 1);
         let latent0_encodings = {
-            let enc = self.reshape_feature(hook_tokens[0].clone(), self.out_size, self.out_size, 1);
-            let dims: [usize; 4] = enc.shape().dims();
-            enc.slice([0..high_count, 0..dims[1], 0..dims[2], 0..dims[3]])
+            let dims: [usize; 4] = latent0_merge_input.shape().dims();
+            latent0_merge_input
+                .clone()
+                .slice([0..high_count, 0..dims[1], 0..dims[2], 0..dims[3]])
         };
-
         let latent1_encodings = {
-            let enc = self.reshape_feature(hook_tokens[1].clone(), self.out_size, self.out_size, 1);
-            let dims: [usize; 4] = enc.shape().dims();
-            enc.slice([0..high_count, 0..dims[1], 0..dims[2], 0..dims[3]])
+            let dims: [usize; 4] = latent1_merge_input.shape().dims();
+            latent1_merge_input
+                .clone()
+                .slice([0..high_count, 0..dims[1], 0..dims[2], 0..dims[3]])
         };
 
         let high_padding = x0_split.feature_padding(self.out_size);
         let mid_padding = x1_split.feature_padding(self.out_size);
+        if cfg!(debug_assertions) {
+            println!("Encoder padding: high={high_padding}, mid={mid_padding}");
+        }
 
-        let x_latent0_features = self.merge(latent0_encodings, batch_size, high_padding);
-        let x_latent1_features = self.merge(latent1_encodings, batch_size, high_padding);
+        let latent0_tokens_clone = latent0_encodings.clone();
+        let latent1_tokens_clone = latent1_encodings.clone();
 
-        let x0_features = self.merge(x0_encodings, batch_size, high_padding);
-        let x1_features = self.merge(x1_encodings, batch_size, mid_padding);
-        let x2_features = x2_encodings;
+        let merged_latent0 = self.merge(latent0_encodings, batch_size, high_padding);
+        let merged_latent1 = self.merge(latent1_encodings, batch_size, high_padding);
+
+        let x0_tokens_clone = x0_encodings.clone();
+        let x1_tokens_clone = x1_encodings.clone();
+        let x2_tokens_clone = x2_encodings.clone();
+
+        let merged_x0 = self.merge(x0_encodings, batch_size, high_padding);
+        let merged_x1 = self.merge(x1_encodings, batch_size, mid_padding);
+        let merged_x2 = x2_encodings;
 
         let x_global_features = self.image_encoder.forward(x2_split.tensor.clone(), None);
         let mut x_global_features = self.reshape_feature(
@@ -375,23 +405,44 @@ impl<B: Backend> DepthProEncoder<B> {
             0,
         );
         x_global_features = self.upsample_lowres.forward(x_global_features);
-        let x2_features = self.upsample2.forward(x2_features);
-        x_global_features = self
-            .fuse_lowres
-            .forward(Tensor::cat(vec![x2_features.clone(), x_global_features], 1));
+        let upsampled_x2 = self.upsample2.forward(merged_x2.clone());
+        x_global_features = self.fuse_lowres.forward(Tensor::cat(
+            vec![upsampled_x2.clone(), x_global_features],
+            1,
+        ));
 
-        let x_latent0_features = self.upsample_latent0.forward(x_latent0_features);
-        let x_latent1_features = self.upsample_latent1.forward(x_latent1_features);
-        let x0_features = self.upsample0.forward(x0_features);
-        let x1_features = self.upsample1.forward(x1_features);
+        let upsampled_latent0 = self.upsample_latent0.forward(merged_latent0.clone());
+        let upsampled_latent1 = self.upsample_latent1.forward(merged_latent1.clone());
+        let upsampled_x0 = self.upsample0.forward(merged_x0.clone());
+        let upsampled_x1 = self.upsample1.forward(merged_x1.clone());
 
-        vec![
-            x_latent0_features,
-            x_latent1_features,
-            x0_features,
-            x1_features,
+        let features = vec![
+            upsampled_latent0.clone(),
+            upsampled_latent1.clone(),
+            upsampled_x0.clone(),
+            upsampled_x1.clone(),
             x_global_features,
-        ]
+        ];
+
+        EncoderDebug {
+            features,
+            latent0: merged_latent0,
+            latent1: merged_latent1,
+            latent0_tokens: latent0_tokens_clone,
+            latent1_tokens: latent1_tokens_clone,
+            latent0_merge_input,
+            latent1_merge_input,
+            x0_tokens: x0_tokens_clone,
+            x1_tokens: x1_tokens_clone,
+            x2_tokens: x2_tokens_clone,
+            merged_x0,
+            merged_x1,
+            merged_x2,
+        }
+    }
+
+    pub fn forward(&self, x: Tensor<B, 4>) -> Vec<Tensor<B, 4>> {
+        self.forward_with_debug(x).features
     }
 }
 

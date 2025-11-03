@@ -9,6 +9,8 @@ use burn::{
     prelude::*,
 };
 
+use crate::model::depth_pro::maybe_fix_conv_transpose2d;
+
 #[derive(Module, Debug)]
 struct ProjectionConv<B: Backend> {
     conv: Option<Conv2d<B>>,
@@ -70,6 +72,7 @@ impl<B: Backend> ResidualBlock<B> {
     }
 
     fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
+        let residual = x.clone();
         let mut out = relu(x);
         out = self.conv1.forward(out);
         if let Some(bn1) = &self.bn1 {
@@ -80,7 +83,7 @@ impl<B: Backend> ResidualBlock<B> {
         if let Some(bn2) = &self.bn2 {
             out = bn2.forward(out);
         }
-        out
+        out + residual
     }
 }
 
@@ -128,6 +131,12 @@ impl<B: Backend> FeatureFusionBlock2d<B> {
         }
 
         self.out_conv.forward(x)
+    }
+
+    fn fix_conv_transpose_weights(&mut self) {
+        if let Some(deconv) = &mut self.deconv {
+            maybe_fix_conv_transpose2d(deconv);
+        }
     }
 }
 
@@ -183,7 +192,10 @@ impl<B: Backend> MultiresConvDecoder<B> {
         }
     }
 
-    pub fn forward(&self, encodings: &[Tensor<B, 4>]) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    pub fn forward_with_debug(
+        &self,
+        encodings: &[Tensor<B, 4>],
+    ) -> (Tensor<B, 4>, Tensor<B, 4>, Vec<Tensor<B, 4>>) {
         let num_levels = encodings.len();
         if num_levels != self.dims_encoder.len() {
             panic!(
@@ -194,13 +206,29 @@ impl<B: Backend> MultiresConvDecoder<B> {
 
         let mut features = self.convs[num_levels - 1].forward(encodings[num_levels - 1].clone());
         let lowres_features = features.clone();
+        let mut fusion_outputs = Vec::with_capacity(num_levels);
         features = self.fusions[num_levels - 1].forward(features, None);
+        fusion_outputs.push(features.clone());
 
         for level in (0..num_levels - 1).rev() {
             let projected = self.convs[level].forward(encodings[level].clone());
             features = self.fusions[level].forward(features, Some(projected));
+            fusion_outputs.push(features.clone());
         }
 
-        (features, lowres_features)
+        fusion_outputs.reverse();
+
+        (features, lowres_features, fusion_outputs)
+    }
+
+    pub fn forward(&self, encodings: &[Tensor<B, 4>]) -> (Tensor<B, 4>, Tensor<B, 4>) {
+        let (features, lowres, _) = self.forward_with_debug(encodings);
+        (features, lowres)
+    }
+
+    pub fn fix_conv_transpose_weights(&mut self) {
+        for fusion in &mut self.fusions {
+            fusion.fix_conv_transpose_weights();
+        }
     }
 }

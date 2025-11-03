@@ -40,13 +40,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (orig_width, orig_height) = image.dimensions();
     let image = image.to_rgb8();
 
-    let mut data = Vec::with_capacity((3 * orig_width * orig_height) as usize);
-    for channel in 0..3 {
-        for y in 0..orig_height {
-            for x in 0..orig_width {
-                let pixel = image.get_pixel(x, y)[channel];
-                data.push(pixel as f32 / 255.0);
-            }
+    let width = orig_width as usize;
+    let height = orig_height as usize;
+    let hw = width * height;
+    let mut data = vec![0.0f32; 3 * hw];
+    for (x, y, pixel) in image.enumerate_pixels() {
+        let base = y as usize * width + x as usize;
+        for channel in 0..3 {
+            let value = pixel[channel] as f32 / 255.0;
+            data[channel * hw + base] = value * 2.0 - 1.0;
         }
     }
 

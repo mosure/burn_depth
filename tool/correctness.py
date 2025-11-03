@@ -98,11 +98,11 @@ class DepthProModule(torch.nn.Module):
             pi = torch.tensor(math.pi, device=device, dtype=dtype)
             width_tensor = torch.tensor(float(width), device=device, dtype=dtype)
             fovx_rad = two * torch.atan(width_tensor / (two * fx_px))
-            fovx_deg = fovx_rad * (180.0 / pi)
+            fovx_deg = (fovx_rad * (180.0 / pi)).view(1)
             fovy_deg = _fovy_from_fovx_torch(fovx_deg, height, width, device, dtype).view(1)
 
             depth_m = depth_meters.unsqueeze(-1)
-            outputs.append({"metric_depth": depth_m, "fovy": fovy_deg})
+            outputs.append({"metric_depth": depth_m, "fovy": fovy_deg, "fovx": fovx_deg})
 
         return outputs
 
@@ -158,10 +158,127 @@ def run(image_path: Path, checkpoint_path: Path, output_path: Path) -> None:
     )
     outputs = model.forward_pil(image)[0]
 
+    fusion_outputs: Dict[str, torch.Tensor] = {}
+
+    def register_fusion(name: str, module: torch.nn.Module) -> None:
+        def hook(_module: torch.nn.Module, _inputs: Tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
+            fusion_outputs[name] = output.detach().to(torch.float32).cpu()
+
+        module.register_forward_hook(hook)
+
+    for idx, fusion in enumerate(model.model.decoder.fusions):
+        register_fusion(f"decoder_fusion_{idx}", fusion)
+
     tensors = {
         "metric_depth": outputs["metric_depth"].to(torch.float32).cpu(),
+        "fovx": outputs["fovx"].to(torch.float32).cpu(),
         "fovy": outputs["fovy"].to(torch.float32).cpu(),
     }
+
+    image_tensor = model.transform(image)
+    batch = image_tensor.unsqueeze(0)
+    if batch.shape[-1] != model.model.img_size or batch.shape[-2] != model.model.img_size:
+        batch = F.interpolate(
+            batch,
+            size=(model.model.img_size, model.model.img_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+    tensors["network_input"] = batch.to(torch.float32).contiguous().cpu()
+    encoder_features = model.model.encoder.forward(batch)
+    for idx, feat in enumerate(encoder_features):
+        tensors[f"encoder_feature_{idx}"] = feat.to(torch.float32).contiguous().cpu()
+
+    encoder = model.model.encoder
+    with torch.no_grad():
+        batch_size = batch.shape[0]
+        x0, x1, x2 = encoder._create_pyramid(batch)
+
+        x0_patches = encoder.split(x0, overlap_ratio=0.25)
+        x1_patches = encoder.split(x1, overlap_ratio=0.5)
+        x2_patches = x2
+
+        x_pyramid_patches = torch.cat((x0_patches, x1_patches, x2_patches), dim=0)
+        x_pyramid_encodings = encoder.patch_encoder(x_pyramid_patches)
+        x_pyramid_encodings = encoder.reshape_feature(
+            x_pyramid_encodings, encoder.out_size, encoder.out_size
+        )
+
+        len_x0 = x0_patches.shape[0]
+        len_x1 = x1_patches.shape[0]
+        len_x2 = x2_patches.shape[0]
+        x0_encodings, x1_encodings, x2_encodings = torch.split(
+            x_pyramid_encodings, [len_x0, len_x1, len_x2], dim=0
+        )
+
+        x_latent0_encodings = encoder.reshape_feature(
+            encoder.backbone_highres_hook0, encoder.out_size, encoder.out_size
+        )
+        x_latent1_encodings = encoder.reshape_feature(
+            encoder.backbone_highres_hook1, encoder.out_size, encoder.out_size
+        )
+
+        x_latent0_features = encoder.merge(
+            x_latent0_encodings[: batch_size * 5 * 5], batch_size=batch_size, padding=3
+        )
+        x_latent1_features = encoder.merge(
+            x_latent1_encodings[: batch_size * 5 * 5], batch_size=batch_size, padding=3
+        )
+        x0_features = encoder.merge(x0_encodings, batch_size=batch_size, padding=3)
+        x1_features = encoder.merge(x1_encodings, batch_size=batch_size, padding=6)
+        x2_features = x2_encodings
+
+        tensors["encoder_latent0_tokens"] = (
+            x_latent0_encodings[: batch_size * 5 * 5]
+            .to(torch.float32)
+            .contiguous()
+            .cpu()
+        )
+        tensors["encoder_latent1_tokens"] = (
+            x_latent1_encodings[: batch_size * 5 * 5]
+            .to(torch.float32)
+            .contiguous()
+            .cpu()
+        )
+        tensors["encoder_latent0_merge_input"] = (
+            x_latent0_encodings.to(torch.float32).contiguous().cpu()
+        )
+        tensors["encoder_latent1_merge_input"] = (
+            x_latent1_encodings.to(torch.float32).contiguous().cpu()
+        )
+        tensors["encoder_merge_latent0"] = (
+            x_latent0_features.to(torch.float32).contiguous().cpu()
+        )
+        tensors["encoder_merge_latent1"] = (
+            x_latent1_features.to(torch.float32).contiguous().cpu()
+        )
+        tensors["encoder_merge_x0"] = x0_features.to(torch.float32).contiguous().cpu()
+        tensors["encoder_merge_x1"] = x1_features.to(torch.float32).contiguous().cpu()
+        tensors["encoder_merge_x2"] = x2_features.to(torch.float32).contiguous().cpu()
+
+    decoder_features, lowres_features = model.model.decoder(encoder_features)
+    tensors["decoder_feature"] = decoder_features.to(torch.float32).contiguous().cpu()
+    tensors["decoder_lowres_feature"] = lowres_features.to(torch.float32).contiguous().cpu()
+
+    for idx in range(len(model.model.decoder.fusions)):
+        key = f"decoder_fusion_{idx}"
+        if key in fusion_outputs:
+            tensors[key] = fusion_outputs[key].contiguous()
+
+    head_modules = list(model.model.head.children())
+    head_conv0 = head_modules[0](decoder_features)
+    head_deconv = head_modules[1](head_conv0)
+    head_conv1 = head_modules[2](head_deconv)
+    head_relu = head_modules[3](head_conv1)
+    head_pre_out = head_modules[4](head_relu)
+    canonical_inverse_depth = head_modules[5](head_pre_out)
+
+    tensors["head_conv0"] = head_conv0.to(torch.float32).contiguous().cpu()
+    tensors["head_deconv"] = head_deconv.to(torch.float32).contiguous().cpu()
+    tensors["head_conv1"] = head_conv1.to(torch.float32).contiguous().cpu()
+    tensors["head_relu"] = head_relu.to(torch.float32).contiguous().cpu()
+    tensors["head_pre_out"] = head_pre_out.to(torch.float32).contiguous().cpu()
+    tensors["canonical_inverse_depth"] = canonical_inverse_depth.to(torch.float32).contiguous().cpu()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(output_path))
@@ -195,3 +312,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

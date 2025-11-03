@@ -168,6 +168,8 @@ impl<B: Backend> FOVNetwork<B> {
         }
     }
 
+    pub fn fix_conv_transpose_weights(&mut self) {}
+
     fn forward_with_encoder(&self, x: Tensor<B, 4>, lowres_feature: Tensor<B, 4>) -> Tensor<B, 4> {
         let mut features = lowres_feature;
         features = self.apply_blocks(&self.downsample_blocks, features);
