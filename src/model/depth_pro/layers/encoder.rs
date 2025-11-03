@@ -1,12 +1,12 @@
 use burn::{
-    nn::{
-        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
-        interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode},
-    },
+    nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
     prelude::*,
 };
 
-use crate::model::{depth_pro::layers::vit::ViTConfig, dino::DinoVisionTransformer};
+use crate::model::{
+    depth_pro::{layers::vit::ViTConfig, resize_bilinear_scale},
+    dino::DinoVisionTransformer,
+};
 
 #[derive(Clone)]
 struct PatchSplit<B: Backend> {
@@ -101,8 +101,6 @@ pub struct DepthProEncoder<B: Backend> {
     upsample2: ProjectUpsampleBlock<B>,
     upsample_lowres: ConvTranspose2d<B>,
     fuse_lowres: Conv2d<B>,
-    half_downsample: Interpolate2d,
-    quarter_downsample: Interpolate2d,
 }
 
 pub struct EncoderDebug<B: Backend> {
@@ -116,6 +114,9 @@ pub struct EncoderDebug<B: Backend> {
     pub x0_tokens: Tensor<B, 4>,
     pub x1_tokens: Tensor<B, 4>,
     pub x2_tokens: Tensor<B, 4>,
+    pub split_x0: Tensor<B, 4>,
+    pub split_x1: Tensor<B, 4>,
+    pub split_x2: Tensor<B, 4>,
     pub merged_x0: Tensor<B, 4>,
     pub merged_x1: Tensor<B, 4>,
     pub merged_x2: Tensor<B, 4>,
@@ -161,15 +162,6 @@ impl<B: Backend> DepthProEncoder<B> {
             .with_bias(true)
             .init(device);
 
-        let half_downsample = Interpolate2dConfig::new()
-            .with_scale_factor(Some([0.5, 0.5]))
-            .with_mode(InterpolateMode::Linear)
-            .init();
-        let quarter_downsample = Interpolate2dConfig::new()
-            .with_scale_factor(Some([0.25, 0.25]))
-            .with_mode(InterpolateMode::Linear)
-            .init();
-
         Self {
             dims_encoder,
             patch_encoder,
@@ -186,8 +178,6 @@ impl<B: Backend> DepthProEncoder<B> {
             upsample2,
             upsample_lowres,
             fuse_lowres,
-            half_downsample,
-            quarter_downsample,
         }
     }
 
@@ -317,13 +307,16 @@ impl<B: Backend> DepthProEncoder<B> {
         let batch_size = dims_root[0];
 
         let x0 = x.clone();
-        let x1 = self.half_downsample.forward(x.clone());
-        let x2 = self.quarter_downsample.forward(x);
+        let x1 = resize_bilinear_scale(x.clone(), [0.5, 0.5]);
+        let x2 = resize_bilinear_scale(x, [0.25, 0.25]);
 
         let x0_split = self.split(x0, 0.25);
         let x1_split = self.split(x1, 0.5);
         let x2_dims: [usize; 4] = x2.shape().dims();
         let x2_split = PatchSplit::new(x2, 1, x2_dims[2], x2_dims[2]);
+        let split_x0_tensor = x0_split.tensor.clone();
+        let split_x1_tensor = x1_split.tensor.clone();
+        let split_x2_tensor = x2_split.tensor.clone();
 
         let x_pyramid_patches = Tensor::cat(
             vec![
@@ -435,6 +428,9 @@ impl<B: Backend> DepthProEncoder<B> {
             x0_tokens: x0_tokens_clone,
             x1_tokens: x1_tokens_clone,
             x2_tokens: x2_tokens_clone,
+            split_x0: split_x0_tensor,
+            split_x1: split_x1_tensor,
+            split_x2: split_x2_tensor,
             merged_x0,
             merged_x1,
             merged_x2,

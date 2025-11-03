@@ -198,6 +198,10 @@ def run(image_path: Path, checkpoint_path: Path, output_path: Path) -> None:
         x1_patches = encoder.split(x1, overlap_ratio=0.5)
         x2_patches = x2
 
+        tensors["encoder_split_x0"] = x0_patches.to(torch.float32).contiguous().cpu()
+        tensors["encoder_split_x1"] = x1_patches.to(torch.float32).contiguous().cpu()
+        tensors["encoder_split_x2"] = x2_patches.to(torch.float32).contiguous().cpu()
+
         x_pyramid_patches = torch.cat((x0_patches, x1_patches, x2_patches), dim=0)
         x_pyramid_encodings = encoder.patch_encoder(x_pyramid_patches)
         x_pyramid_encodings = encoder.reshape_feature(
@@ -252,6 +256,9 @@ def run(image_path: Path, checkpoint_path: Path, output_path: Path) -> None:
         tensors["encoder_merge_latent1"] = (
             x_latent1_features.to(torch.float32).contiguous().cpu()
         )
+        tensors["encoder_x0_tokens"] = x0_encodings.to(torch.float32).contiguous().cpu()
+        tensors["encoder_x1_tokens"] = x1_encodings.to(torch.float32).contiguous().cpu()
+        tensors["encoder_x2_tokens"] = x2_encodings.to(torch.float32).contiguous().cpu()
         tensors["encoder_merge_x0"] = x0_features.to(torch.float32).contiguous().cpu()
         tensors["encoder_merge_x1"] = x1_features.to(torch.float32).contiguous().cpu()
         tensors["encoder_merge_x2"] = x2_features.to(torch.float32).contiguous().cpu()

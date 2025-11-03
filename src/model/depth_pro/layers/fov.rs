@@ -2,12 +2,11 @@ use burn::{
     nn::{
         Linear, LinearConfig, PaddingConfig2d,
         conv::{Conv2d, Conv2dConfig},
-        interpolate::{Interpolate2d, Interpolate2dConfig, InterpolateMode},
     },
     prelude::*,
 };
 
-use crate::model::dino::DinoVisionTransformer;
+use crate::model::{depth_pro::resize_bilinear_scale, dino::DinoVisionTransformer};
 use burn::tensor::activation::relu;
 
 #[derive(Module, Debug)]
@@ -45,7 +44,7 @@ pub struct FOVNetwork<B: Backend> {
     num_features: usize,
     encoder: Option<DinoVisionTransformer<B>>,
     encoder_proj: Option<Linear<B>>,
-    downsample_input: Option<Interpolate2d>,
+    downsample_input_scale: Option<[f32; 2]>,
     downsample_blocks: Vec<ConvActivation<B>>,
     head_blocks: Vec<ConvActivation<B>>,
 }
@@ -59,18 +58,13 @@ impl<B: Backend> FOVNetwork<B> {
         let mut downsample_blocks = Vec::new();
         let mut head_blocks = Vec::new();
         let mut encoder_proj = None;
-        let mut downsample_input = None;
+        let mut downsample_input_scale = None;
         let mut encoder = None;
 
         if let Some(model) = fov_encoder {
             let embed_dim = model.embedding_dimension();
             encoder_proj = Some(LinearConfig::new(embed_dim, num_features / 2).init(device));
-            downsample_input = Some(
-                Interpolate2dConfig::new()
-                    .with_scale_factor(Some([0.25, 0.25]))
-                    .with_mode(InterpolateMode::Linear)
-                    .init(),
-            );
+            downsample_input_scale = Some([0.25, 0.25]);
 
             downsample_blocks.push(ConvActivation::new(
                 device,
@@ -154,7 +148,7 @@ impl<B: Backend> FOVNetwork<B> {
             num_features,
             encoder,
             encoder_proj,
-            downsample_input,
+            downsample_input_scale,
             downsample_blocks,
             head_blocks,
         }
@@ -182,10 +176,9 @@ impl<B: Backend> FOVNetwork<B> {
     }
 
     fn encode_image(&self, x: Tensor<B, 4>, target_shape: [usize; 4]) -> Tensor<B, 4> {
-        let downsample = self
-            .downsample_input
-            .as_ref()
-            .expect("FOVNetwork encoder should have downsample module");
+        let downsample_scale = self
+            .downsample_input_scale
+            .expect("FOVNetwork encoder should have downsample configuration");
         let encoder = self
             .encoder
             .as_ref()
@@ -195,7 +188,7 @@ impl<B: Backend> FOVNetwork<B> {
             .as_ref()
             .expect("FOVNetwork encoder missing projection layer");
 
-        let x = downsample.forward(x);
+        let x = resize_bilinear_scale(x, downsample_scale);
         let tokens = encoder.forward(x, None).x_norm_patchtokens;
         let dims: [usize; 3] = tokens.shape().dims();
         let batch = dims[0];

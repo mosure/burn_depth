@@ -13,8 +13,10 @@ pub mod layers {
     pub mod fov;
     pub mod vit;
 }
+mod interpolate;
 
 use burn::tensor::activation::relu;
+pub use interpolate::{resize_bilinear_align_corners_false, resize_bilinear_scale};
 use layers::{
     decoder::MultiresConvDecoder,
     encoder::{DepthProEncoder, EncoderDebug},
@@ -285,7 +287,7 @@ impl<B: Backend> DepthPro<B> {
         &self,
         mut x: Tensor<B, 4>,
         f_px: Option<Tensor<B, 1>>,
-        interpolation_mode: InterpolateMode,
+        _interpolation_mode: InterpolateMode,
     ) -> DepthProInference<B> {
         let dims: [usize; 4] = x.shape().dims();
         let batch = dims[0];
@@ -294,11 +296,10 @@ impl<B: Backend> DepthPro<B> {
         let resize_needed = self.encoder.img_size() != height || self.encoder.img_size() != width;
 
         if resize_needed {
-            let resize = burn::nn::interpolate::Interpolate2dConfig::new()
-                .with_output_size(Some([self.encoder.img_size(), self.encoder.img_size()]))
-                .with_mode(interpolation_mode.clone())
-                .init();
-            x = resize.forward(x);
+            x = resize_bilinear_align_corners_false(
+                x,
+                [self.encoder.img_size(), self.encoder.img_size()],
+            );
         }
 
         let (canonical_inverse_depth, fov_deg) = self.forward(x.clone());
@@ -324,11 +325,7 @@ impl<B: Backend> DepthPro<B> {
         let mut inverse_depth = canonical_inverse_depth * ratio;
 
         if resize_needed {
-            let resize_back = burn::nn::interpolate::Interpolate2dConfig::new()
-                .with_output_size(Some([height, width]))
-                .with_mode(interpolation_mode)
-                .init();
-            inverse_depth = resize_back.forward(inverse_depth);
+            inverse_depth = resize_bilinear_align_corners_false(inverse_depth, [height, width]);
         }
 
         let depth = inverse_depth.clamp(1e-4, 1e4).recip().squeeze_dim(1);

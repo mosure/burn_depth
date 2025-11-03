@@ -7,6 +7,10 @@
 burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 
 
+|-----------------------|-----------------------|
+| ![Alt text](./assets/image/test.jpg)    | ![Alt text](./docs/test_depth.png)    |
+
+
 ## setup
 
 - download `depth_pro.pt` to `assets/model/`
