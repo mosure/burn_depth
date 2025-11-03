@@ -13,9 +13,7 @@ use burn::{
 use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
 use image::GenericImageView;
 
-
 type InferenceBackend = Cuda<f32>;
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = <InferenceBackend as Backend>::Device::default();

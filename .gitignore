@@ -7,10 +7,12 @@ out/
 
 *.pt
 *.py
+!tool/*.py
 *.mpk
 
 *.ply
 *.gcloud
+*.safetensors
 
 .DS_Store
 

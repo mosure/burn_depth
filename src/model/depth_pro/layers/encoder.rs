@@ -235,21 +235,9 @@ impl<B: Backend> DepthProEncoder<B> {
             return Tensor::zeros([batch_size as i32, channels as i32, 0, 0], &x.device());
         }
 
-        let inner_height = height.saturating_sub(2 * padding);
-        let inner_width = width.saturating_sub(2 * padding);
-        let output_height = height + (steps - 1) * inner_height;
-        let output_width = width + (steps - 1) * inner_width;
-        let mut output = Tensor::<B, 4>::zeros(
-            [
-                batch_size as i32,
-                channels as i32,
-                output_height as i32,
-                output_width as i32,
-            ],
-            &x.device(),
-        );
-
+        let mut rows: Vec<Tensor<B, 4>> = Vec::with_capacity(steps);
         for j in 0..steps {
+            let mut row_patches: Vec<Tensor<B, 4>> = Vec::with_capacity(steps);
             for i in 0..steps {
                 let idx = j * steps + i;
                 let start = batch_size * idx;
@@ -276,24 +264,14 @@ impl<B: Backend> DepthProEncoder<B> {
                     ]);
                 }
 
-                let patch_dims: [usize; 4] = patch.shape().dims();
-                let slice_height = patch_dims[2];
-                let slice_width = patch_dims[3];
-                debug_assert!(slice_height > 0 && slice_width > 0);
-
-                let base_y = j * inner_height + if j == 0 { 0 } else { padding };
-                let base_x = i * inner_width + if i == 0 { 0 } else { padding };
-                let y1 = base_y + slice_height;
-                let x1 = base_x + slice_width;
-
-                let patch = patch;
-                output.inplace(|tensor| {
-                    tensor.slice_assign([0..batch_size, 0..channels, base_y..y1, base_x..x1], patch)
-                });
+                row_patches.push(patch);
             }
+
+            let row = Tensor::cat(row_patches, 3);
+            rows.push(row);
         }
 
-        output
+        Tensor::cat(rows, 2)
     }
 
     fn reshape_feature(
