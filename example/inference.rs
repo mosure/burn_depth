@@ -11,7 +11,7 @@ use burn::{
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
 };
 use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
-use image::imageops::FilterType;
+use image::GenericImageView;
 
 
 type InferenceBackend = Cuda<f32>;
@@ -39,15 +39,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let image = image::open(image_path)
         .map_err(|err| format!("Failed to load image `{}`: {err}", image_path.display()))?;
 
-    let image_size = model.img_size() as u32;
-    let image = image
-        .resize_exact(image_size, image_size, FilterType::Triangle)
-        .to_rgb8();
+    let (orig_width, orig_height) = image.dimensions();
+    let image = image.to_rgb8();
 
-    let mut data = Vec::with_capacity((3 * image_size * image_size) as usize);
+    let mut data = Vec::with_capacity((3 * orig_width * orig_height) as usize);
     for channel in 0..3 {
-        for y in 0..image_size {
-            for x in 0..image_size {
+        for y in 0..orig_height {
+            for x in 0..orig_width {
                 let pixel = image.get_pixel(x, y)[channel];
                 data.push(pixel as f32 / 255.0);
             }
@@ -58,8 +56,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Tensor::<InferenceBackend, 1>::from_floats(data.as_slice(), &device).reshape([
             1,
             3,
-            image_size as usize,
-            image_size as usize,
+            orig_height as usize,
+            orig_width as usize,
         ]);
 
     let result = model.infer(input, None, InterpolateMode::Linear);
