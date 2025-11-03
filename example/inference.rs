@@ -2,19 +2,24 @@
 
 use std::{fs, path::Path};
 
+#[allow(unused_imports)]
 use burn::{
-    backend::Wgpu,
+    backend::{Cuda, NdArray},
     module::Module,
     nn::interpolate::InterpolateMode,
     prelude::*,
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
 };
 use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
-use half::f16;
 use image::imageops::FilterType;
 
+
+type InferenceBackend = Cuda<f32>;
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let device = <Wgpu<f16> as Backend>::Device::default();
+    let device = <InferenceBackend as Backend>::Device::default();
+
     let checkpoint_path = Path::new("assets/model/depth_pro.mpk");
     if !checkpoint_path.exists() {
         return Err(format!(
@@ -24,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let model = DepthPro::<Wgpu<f16>>::new(&device, DepthProConfig::default());
+    let model = DepthPro::<InferenceBackend>::new(&device, DepthProConfig::default());
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
     let model = model
         .load_file(checkpoint_path, &recorder, &device)
@@ -49,8 +54,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let input: Tensor<Wgpu<f16>, 4> = Tensor::<Wgpu<f16>, 1>::from_floats(data.as_slice(), &device)
-        .reshape([1, 3, image_size as usize, image_size as usize]);
+    let input: Tensor<InferenceBackend, 4> =
+        Tensor::<InferenceBackend, 1>::from_floats(data.as_slice(), &device).reshape([
+            1,
+            3,
+            image_size as usize,
+            image_size as usize,
+        ]);
 
     let result = model.infer(input, None, InterpolateMode::Linear);
 

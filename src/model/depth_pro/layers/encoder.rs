@@ -286,8 +286,10 @@ impl<B: Backend> DepthProEncoder<B> {
                 let y1 = base_y + slice_height;
                 let x1 = base_x + slice_width;
 
-                output = output
-                    .slice_assign([0..batch_size, 0..channels, base_y..y1, base_x..x1], patch);
+                let patch = patch;
+                output.inplace(|tensor| {
+                    tensor.slice_assign([0..batch_size, 0..channels, base_y..y1, base_x..x1], patch)
+                });
             }
         }
 
@@ -339,17 +341,14 @@ impl<B: Backend> DepthProEncoder<B> {
             0,
         );
 
-        let (_patch_tokens, hook_tokens) = self
+        let (patch_output, hook_tokens) = self
             .patch_encoder
             .forward_with_intermediate_tokens(x_pyramid_patches.clone(), &self.hook_block_ids);
         assert!(
             hook_tokens.len() >= 2,
             "DepthPro encoder expects at least two hook tokens"
         );
-        let patch_output = self
-            .patch_encoder
-            .forward(x_pyramid_patches, None)
-            .x_norm_patchtokens;
+        let patch_output = patch_output.x_norm_patchtokens;
 
         let x_pyramid_encodings =
             self.reshape_feature(patch_output, self.out_size, self.out_size, 0);
@@ -421,8 +420,8 @@ impl<B: Backend> DepthProEncoder<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::depth_pro::layers::vit::{create_vit, DINOV2_L16_128};
-    use burn_ndarray::NdArray;
+    use crate::model::depth_pro::layers::vit::{DINOV2_L16_128, create_vit};
+    use burn::backend::NdArray;
 
     type TestBackend = NdArray<f32>;
 
@@ -513,8 +512,10 @@ mod tests {
 
                     let slice_height = feature_size - top_trim - bottom_trim;
                     let slice_width = feature_size - left_trim - right_trim;
-                    let base_y = j * (feature_size - 2 * padding) + if j == 0 { 0 } else { padding };
-                    let base_x = i * (feature_size - 2 * padding) + if i == 0 { 0 } else { padding };
+                    let base_y =
+                        j * (feature_size - 2 * padding) + if j == 0 { 0 } else { padding };
+                    let base_x =
+                        i * (feature_size - 2 * padding) + if i == 0 { 0 } else { padding };
 
                     for channel in 0..channels {
                         for dy in 0..slice_height {

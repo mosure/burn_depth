@@ -282,20 +282,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55248b47b0caf0546f7988906588779981c43bb1bc9d0c44087278f80cdb44ba"
 
 [[package]]
-name = "bevy_args"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78be90b7057af29f4d871d241718a974f921ee9cd04efc1d8e3c8eb1d40c8b8a"
-dependencies = [
- "clap",
- "console_error_panic_hook",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "web-sys",
-]
-
-[[package]]
 name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -915,18 +901,12 @@ dependencies = [
 name = "burn_depth_pro"
 version = "0.1.0"
 dependencies = [
- "bevy_args",
  "burn",
- "burn-cuda",
  "burn-import",
- "burn-ndarray",
  "burn-store",
- "burn-wgpu",
  "clap",
  "console_error_panic_hook",
  "criterion",
- "cubecl",
- "cubecl-runtime",
  "futures-intrusive",
  "half",
  "image",

@@ -28,30 +28,26 @@ exclude = [
 
 
 [features]
-default = []
+default = [
+  # "backend_fusion",
+  "backend_ndarray",
+]
 
-benchmark = ["burn/autotune", "burn/fusion"]
-import = ["bevy_args", "burn-import", "burn-store", "clap", "serde"]
-test_wgpu_f16 = []
-test_cuda = []
+import = ["burn-import", "burn-store", "clap", "serde"]
+
+backend_cuda =["burn/cuda"]
+backend_fusion = ["burn/fusion"]
+backend_ndarray = ["burn/ndarray"]
+backend_wgpu = ["burn/wgpu"]
 
 
 [dependencies]
-# burn-import = { version = "0.17", features = ["pytorch"], optional = true }
 burn-import = { version = "0.19", features = ["pytorch"], optional = true }
-burn-ndarray = "0.19"
 burn-store = { version = "0.19", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
 serde = { version = "1.0", optional = true }
 serde_json = "1.0"
 half = "2"
-wgpu = "26.0"
-
-
-[dependencies.bevy_args]
-version = "2.0"
-default-features = false
-optional = true
 
 
 [dependencies.burn]
@@ -59,6 +55,7 @@ version = "0.19"
 default-features = true
 features = [
   # "autotune",
+  "cuda",
   "fusion",
   "ndarray",
   "std",
@@ -67,38 +64,41 @@ features = [
   "wgpu",
 ]
 
-[dependencies.burn-wgpu]
-version = "0.19"
-default-features = true
-features = [
-  "fusion",
-  "std",
-  # "template",
-]
+# [dependencies.burn-wgpu]
+# version = "0.19"
+# default-features = true
+# optional = true
+# features = [
+#   "fusion",
+#   "std",
+#   # "template",
+# ]
 
-[dependencies.cubecl]
-version = "0.8"
-default-features = true
-features = [
-  # "autotune-checks",
-  # "linalg",
-  "std",
-  # "template",
-  # "wgpu",
-  # "wgpu-spirv",
-]
+# [dependencies.cubecl]
+# version = "0.8"
+# default-features = true
+# optional = true
+# features = [
+#   # "autotune-checks",
+#   # "linalg",
+#   "std",
+#   # "template",
+#   "wgpu",
+#   # "wgpu-spirv",
+# ]
 
-[dependencies.cubecl-runtime]
-version = "0.8"
-default-features = true
-features = [
-  # "autotune-checks",
-  # "channel-cell",
-  "channel-mpsc",
-  # "channel-mutex",
-  "std",
-  # "storage-bytes",
-]
+# [dependencies.cubecl-runtime]
+# version = "0.8"
+# default-features = true
+# optional = true
+# features = [
+#   # "autotune-checks",
+#   # "channel-cell",
+#   "channel-mpsc",
+#   # "channel-mutex",
+#   "std",
+#   # "storage-bytes",
+# ]
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -119,12 +119,13 @@ features = [
 
 
 [dev-dependencies]
-burn-cuda = { version = "0.19", features = ["fusion"] }
 criterion = { version = "0.7", features = ["html_reports"] }
 futures-intrusive = { version = "0.5.0" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pollster = { version = "0.4.0" }
 safetensors = "0.6"
+wgpu = "26.0"
+
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", tag = "v0.17.3" }

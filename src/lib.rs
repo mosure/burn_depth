@@ -5,18 +5,19 @@ pub mod model;
 #[cfg(test)]
 mod tests {
     use super::model::depth_pro::{DepthPro, DepthProConfig, layers::vit::DINOV2_L16_128};
+    use burn::backend::{
+        Cuda as CudaBackend, NdArray as NdArrayBackend, Wgpu,
+        wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup},
+    };
     use burn::{nn::interpolate::InterpolateMode, prelude::*};
-    use burn_cuda::Cuda as CudaBackend;
-    use burn_ndarray::NdArray as NdArrayBackend;
-    use burn_wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup};
     use half::f16;
     use std::any::type_name;
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::OnceLock;
     use wgpu::Features;
 
-    type WgpuHalfBackend = burn_wgpu::Wgpu<f16>;
-    type WgpuF32Backend = burn_wgpu::Wgpu<f32>;
+    type WgpuHalfBackend = Wgpu<f16>;
+    type WgpuF32Backend = Wgpu<f32>;
 
     static WGPU_FEATURES: OnceLock<Result<Features, String>> = OnceLock::new();
 
@@ -156,8 +157,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_wgpu_f16"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features test_wgpu_f16`"
+        not(feature = "backend_wgpu"),
+        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
     )]
     fn depth_pro_initializes_wgpu_f16() {
         run_initializes_test::<WgpuHalfBackend, _>(
@@ -168,8 +169,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_wgpu_f16"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features test_wgpu_f16`"
+        not(feature = "backend_wgpu"),
+        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
     )]
     fn depth_pro_roundtrip_record_wgpu_f16() {
         run_roundtrip_test::<WgpuHalfBackend, _>(
@@ -196,8 +197,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features test_cuda`"
+        not(feature = "backend_cuda"),
+        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
     )]
     fn depth_pro_initializes_cuda() {
         run_initializes_test::<CudaBackend<f32>, _>(
@@ -208,8 +209,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features test_cuda`"
+        not(feature = "backend_cuda"),
+        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
     )]
     fn depth_pro_roundtrip_record_cuda() {
         run_roundtrip_test::<CudaBackend<f32>, _>(
@@ -236,8 +237,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_wgpu_f16"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features test_wgpu_f16`"
+        not(feature = "backend_wgpu"),
+        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
     )]
     fn depth_pro_infers_wgpu_f16() {
         run_inference_test::<WgpuHalfBackend, _>(
@@ -256,8 +257,8 @@ mod tests {
 
     #[test]
     #[cfg_attr(
-        not(feature = "test_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features test_cuda`"
+        not(feature = "backend_cuda"),
+        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
     )]
     fn depth_pro_infers_cuda() {
         run_inference_test::<CudaBackend<f32>, _>(

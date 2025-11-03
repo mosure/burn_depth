@@ -14,7 +14,7 @@ use burn_store::{
 };
 use serde_json::Value;
 
-type Backend = burn_ndarray::NdArray<f32>;
+type Backend = burn::backend::NdArray<f32>;
 
 const CHECKPOINT_PATH: &str = "assets/model/depth_pro.pt";
 const OUTPUT_PATH: &str = "assets/model/depth_pro.mpk";
@@ -254,13 +254,11 @@ fn report_apply_result(
 
     if !result.missing.is_empty() {
         println!(
-            "Info: {} tensor(s) absent from checkpoint; default initialization retained.",
+            "Warning: {} tensor(s) absent from checkpoint; default initialization retained.",
             result.missing.len()
         );
-        if debug {
-            for key in &result.missing {
-                println!("  - {}", key);
-            }
+        for key in &result.missing {
+            println!("  - {}", key);
         }
     }
 

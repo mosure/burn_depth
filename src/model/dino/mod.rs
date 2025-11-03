@@ -163,6 +163,27 @@ pub struct DinoVisionTransformer<B: Backend> {
 }
 
 impl<B: Backend> DinoVisionTransformer<B> {
+    fn finalize_output(
+        &self,
+        tokens: Tensor<B, 3>,
+        masks: Option<Tensor<B, 3, Bool>>,
+    ) -> DinoOutput<B> {
+        let x_norm = self.norm.forward(tokens.clone());
+
+        let b_dim = tokens.shape().dims[0];
+        let n_dim = tokens.shape().dims[1];
+
+        let x_norm_clstoken = x_norm.clone().slice([0..b_dim, 0..1]).squeeze_dim(1);
+        let x_norm_patchtokens = x_norm.clone().slice([0..b_dim, 1..n_dim]);
+
+        DinoOutput {
+            x_norm_clstoken,
+            x_norm_patchtokens,
+            x_prenorm: tokens,
+            masks,
+        }
+    }
+
     pub fn new(device: &B::Device, config: DinoVisionTransformerConfig) -> Self {
         // TODO: initialize cls_token and pos_embed with trainable weights
         // trunc_normal_(self.pos_embed, std=0.02)
@@ -337,7 +358,7 @@ impl<B: Backend> DinoVisionTransformer<B> {
         &self,
         x: Tensor<B, 4>,
         layers: &[usize],
-    ) -> (Tensor<B, 3>, Vec<Tensor<B, 3>>) {
+    ) -> (DinoOutput<B>, Vec<Tensor<B, 3>>) {
         let mut tokens = self.prepare_tokens_with_masks(x, None);
         let mut selected = Vec::with_capacity(layers.len());
 
@@ -349,7 +370,8 @@ impl<B: Backend> DinoVisionTransformer<B> {
             }
         }
 
-        (tokens, selected)
+        let output = self.finalize_output(tokens, None);
+        (output, selected)
     }
 
     pub fn embedding_dimension(&self) -> usize {
@@ -357,25 +379,12 @@ impl<B: Backend> DinoVisionTransformer<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 4>, masks: Option<Tensor<B, 3, Bool>>) -> DinoOutput<B> {
-        let mut x = self.prepare_tokens_with_masks(x, None);
+        let mut tokens = self.prepare_tokens_with_masks(x, None);
 
         for block in &self.blocks {
-            x = block.forward(x);
+            tokens = block.forward(tokens);
         }
 
-        let x_norm = self.norm.forward(x.clone());
-
-        let b_dim = x.shape().dims[0];
-        let n_dim = x.shape().dims[1];
-
-        let x_norm_clstoken = x_norm.clone().slice([0..b_dim, 0..1]).squeeze_dim(1);
-        let x_norm_patchtokens = x_norm.clone().slice([0..b_dim, 1..n_dim]);
-
-        DinoOutput {
-            x_norm_clstoken,
-            x_norm_patchtokens,
-            x_prenorm: x,
-            masks,
-        }
+        self.finalize_output(tokens, masks)
     }
 }
