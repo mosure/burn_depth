@@ -125,6 +125,7 @@ pub struct EncoderDebug<B: Backend> {
 }
 
 impl<B: Backend> DepthProEncoder<B> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         device: &B::Device,
         dims_encoder: Vec<usize>,

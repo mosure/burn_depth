@@ -14,9 +14,10 @@ pub enum InterpolationMethod {
     Burn,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for InterpolationMethod {
     fn default() -> Self {
-        Self::Custom
+        InterpolationMethod::Custom
     }
 }
 
