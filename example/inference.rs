@@ -2,12 +2,14 @@
 
 use std::{fs, path::Path};
 
-#[allow(unused_imports)]
-use burn::{backend::NdArray, nn::interpolate::InterpolateMode, prelude::*};
-use burn_depth::{inference::infer_from_rgb, model::depth_pro::DepthPro};
+use burn::prelude::*;
+use burn_depth::{
+    InferenceBackend,
+    inference::infer_from_rgb,
+    model::depth_pro::DepthPro,
+};
 use image::GenericImageView;
 
-type InferenceBackend = NdArray<f32>;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = <InferenceBackend as Backend>::Device::default();
@@ -40,7 +42,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         height,
         &device,
         None,
-        InterpolateMode::Linear,
     )
     .map_err(|err| format!("Failed to run inference: {err}"))?;
 

@@ -1,4 +1,4 @@
-use burn::{nn::interpolate::InterpolateMode, prelude::*};
+use burn::prelude::*;
 
 use crate::model::depth_pro::{DepthPro, DepthProInference};
 
@@ -56,10 +56,9 @@ pub fn infer_from_rgb<B: Backend>(
     height: usize,
     device: &B::Device,
     focal_length_px: Option<Tensor<B, 1>>,
-    interpolation: InterpolateMode,
 ) -> Result<DepthProInference<B>, String> {
     let input = rgb_to_input_tensor::<B>(rgb, width, height, device)?;
-    Ok(model.infer(input, focal_length_px, interpolation))
+    Ok(model.infer(input, focal_length_px))
 }
 
 #[cfg(test)]

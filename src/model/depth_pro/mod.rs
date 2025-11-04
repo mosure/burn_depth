@@ -1,9 +1,6 @@
 use burn::{
     module::{Module, Param},
-    nn::{
-        conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
-        interpolate::InterpolateMode,
-    },
+    nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
     prelude::*,
     record::{FullPrecisionSettings, NamedMpkFileRecorder, RecorderError},
 };
@@ -294,7 +291,6 @@ impl<B: Backend> DepthPro<B> {
         &self,
         mut x: Tensor<B, 4>,
         f_px: Option<Tensor<B, 1>>,
-        _interpolation_mode: InterpolateMode,
     ) -> DepthProInference<B> {
         let dims: [usize; 4] = x.shape().dims();
         let batch = dims[0];

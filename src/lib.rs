@@ -3,6 +3,27 @@
 pub mod inference;
 pub mod model;
 
+
+#[cfg(feature = "backend_cpu")]
+use burn::backend::Cpu;
+
+#[cfg(feature = "backend_cuda")]
+use burn::backend::Cuda;
+
+#[cfg(feature = "backend_ndarray")]
+use burn::backend::NdArray;
+
+
+#[cfg(feature = "backend_cpu")]
+pub type InferenceBackend = Cpu;
+
+#[cfg(feature = "backend_cuda")]
+pub type InferenceBackend = Cuda;
+
+#[cfg(feature = "backend_ndarray")]
+pub type InferenceBackend = NdArray;
+
+
 #[cfg(test)]
 mod tests {
     use super::model::depth_pro::{DepthPro, DepthProConfig, layers::vit::DINOV2_L16_128};
@@ -19,7 +40,7 @@ mod tests {
         wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup},
     };
 
-    use burn::{nn::interpolate::InterpolateMode, prelude::*};
+    use burn::prelude::*;
     use std::any::type_name;
     use std::panic::{self, AssertUnwindSafe};
 
@@ -173,7 +194,7 @@ mod tests {
         let model = build_model::<B>(&device);
         let size = model.img_size();
         let input = Tensor::<B, 4>::zeros([1, 3, size, size], &device);
-        let result = model.infer(input, None, InterpolateMode::Nearest);
+        let result = model.infer(input, None);
 
         assert_eq!(result.depth.shape().dims(), [1, size, size]);
         assert_eq!(result.focallength_px.shape().dims(), [1]);

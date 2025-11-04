@@ -3,18 +3,17 @@
 use std::{convert::TryInto, f32::consts::PI, path::Path};
 
 use burn::{
-    backend::NdArray,
     nn::interpolate::{Interpolate2dConfig, InterpolateMode},
     prelude::*,
 };
 use burn_depth::{
+    InferenceBackend,
     inference::rgb_to_input_tensor,
     model::depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
 };
 use image::GenericImageView;
 use safetensors::tensor::{SafeTensors, TensorView};
 
-type CorrectnessBackend = NdArray<f32>;
 
 #[derive(Clone)]
 struct FeatureTensor {
@@ -191,7 +190,7 @@ fn load_torch_reference(path: &Path) -> Result<TorchReference, Box<dyn std::erro
 }
 
 fn tensor_to_feature(
-    tensor: Tensor<CorrectnessBackend, 4>,
+    tensor: Tensor<InferenceBackend, 4>,
 ) -> Result<FeatureTensor, Box<dyn std::error::Error>> {
     let shape = tensor.shape().dims::<4>().to_vec();
     let data = tensor
@@ -204,8 +203,8 @@ fn tensor_to_feature(
 
 fn feature_tensor_to_tensor(
     feature: &FeatureTensor,
-    device: &<CorrectnessBackend as Backend>::Device,
-) -> Result<Tensor<CorrectnessBackend, 4>, Box<dyn std::error::Error>> {
+    device: &<InferenceBackend as Backend>::Device,
+) -> Result<Tensor<InferenceBackend, 4>, Box<dyn std::error::Error>> {
     let dims: [usize; 4] = feature
         .shape
         .as_slice()
@@ -218,16 +217,16 @@ fn feature_tensor_to_tensor(
         dims[3] as i32,
     ];
     Ok(
-        Tensor::<CorrectnessBackend, 1>::from_floats(feature.data.as_slice(), device)
+        Tensor::<InferenceBackend, 1>::from_floats(feature.data.as_slice(), device)
             .reshape(dims_i32),
     )
 }
 
 fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::error::Error>> {
-    let device = <CorrectnessBackend as Backend>::Device::default();
+    let device = <InferenceBackend as Backend>::Device::default();
     let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
-    let model = DepthPro::<CorrectnessBackend>::load(&device, checkpoint)
+    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint)
         .map_err(|err| format!("failed to load checkpoint: {err}"))?;
 
     let image = image::open(image_path)?;
@@ -236,7 +235,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
 
     let width = orig_width as usize;
     let height = orig_height as usize;
-    let input = rgb_to_input_tensor::<CorrectnessBackend>(image.as_raw(), width, height, &device)
+    let input = rgb_to_input_tensor::<InferenceBackend>(image.as_raw(), width, height, &device)
         .map_err(|err| format!("failed to prepare input tensor: {err}"))?;
 
     let mut feature_input = input.clone();
@@ -266,11 +265,11 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
         merged_x0: encoder_merge_x0_tensor,
         merged_x1: encoder_merge_x1_tensor,
         merged_x2: encoder_merge_x2_tensor,
-    }: EncoderDebug<CorrectnessBackend> = model.encoder_forward_debug(feature_input.clone());
+    }: EncoderDebug<InferenceBackend> = model.encoder_forward_debug(feature_input.clone());
     println!("Burn encoder feature shapes:");
     let mut burn_features = Vec::with_capacity(encoder_feature_tensors.len());
     for (idx, feature) in encoder_feature_tensors.into_iter().enumerate() {
-        let feature: Tensor<CorrectnessBackend, 4> = feature;
+        let feature: Tensor<InferenceBackend, 4> = feature;
         let dims = feature.shape().dims::<4>();
         println!("  {idx}: {:?}", dims);
         burn_features.push(tensor_to_feature(feature)?);
@@ -361,7 +360,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
     let head_pre_out =
         tensor_to_feature(pre_out).map_err(|err| format!("failed to fetch head pre_out: {err}"))?;
 
-    let output = model.infer(input, None, InterpolateMode::Linear);
+    let output = model.infer(input, None);
     let depth = output
         .depth
         .into_data()
@@ -450,10 +449,10 @@ fn compare_decoder_with_reference(
         return Ok(());
     }
 
-    let device = <CorrectnessBackend as Backend>::Device::default();
+    let device = <InferenceBackend as Backend>::Device::default();
     let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
-    let model = DepthPro::<CorrectnessBackend>::load(&device, checkpoint)
+    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint)
         .map_err(|err| format!("failed to load checkpoint for decoder replay: {err}"))?;
 
     let mut encoder_inputs = Vec::with_capacity(torch_reference.encoder_features.len());

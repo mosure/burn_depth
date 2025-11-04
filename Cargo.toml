@@ -29,20 +29,24 @@ exclude = [
 
 [features]
 default = [
-  "backend_fusion",
+  # "backend_cpu",
+  # "backend_fusion",
+
   "backend_ndarray",
 ]
 
 import = ["burn-import", "burn-store", "clap", "serde"]
 
+# note: one-hot requirement
+backend_cpu = ["burn/cpu"]
 backend_cuda =["burn/cuda"]
 backend_fusion = ["burn/fusion"]
-backend_llvm = ["burn/cpu"]
-backend_ndarray = ["burn/ndarray"]
+backend_ndarray = ["burn/ndarray", "burn/simd"]
 backend_wgpu = ["burn/wgpu"]
 
 
 [dependencies]
+burn = "0.19"
 burn-import = { version = "0.19", features = ["pytorch"], optional = true }
 burn-store = { version = "0.19", optional = true }
 clap = { version = "4.5", features = ["derive"], optional = true }
@@ -52,63 +56,12 @@ half = "2"
 safetensors = "0.6"
 
 
-[dependencies.burn]
-version = "0.19"
-default-features = true
-features = [
-  # "autotune",
-  # "cuda",
-  # "fusion",
-  # "ndarray",
-  "std",
-  # "vulkan",
-  # "webgpu",
-  # "wgpu",
-]
-
-# [dependencies.burn-wgpu]
-# version = "0.19"
-# default-features = true
-# optional = true
-# features = [
-#   "fusion",
-#   "std",
-#   # "template",
-# ]
-
-# [dependencies.cubecl]
-# version = "0.8"
-# default-features = true
-# optional = true
-# features = [
-#   # "autotune-checks",
-#   # "linalg",
-#   "std",
-#   # "template",
-#   "wgpu",
-#   # "wgpu-spirv",
-# ]
-
-# [dependencies.cubecl-runtime]
-# version = "0.8"
-# default-features = true
-# optional = true
-# features = [
-#   # "autotune-checks",
-#   # "channel-cell",
-#   "channel-mpsc",
-#   # "channel-mutex",
-#   "std",
-#   # "storage-bytes",
-# ]
-
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
 
 
-[dependencies.web-sys]
+[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
 features = [
   'Document',
