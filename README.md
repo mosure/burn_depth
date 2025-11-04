@@ -17,7 +17,7 @@ burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 ```rust
 use burn_depth::model::depth_pro::DepthPro;
 
-let model = DepthPro::<InferenceBackend>::load("assets/model/depth_pro.pt")?;
+let model = DepthPro::<InferenceBackend>::load("assets/model/depth_pro.mpk")?;
 let depth = model.forward(input);
 ```
 
@@ -25,5 +25,5 @@ let depth = model.forward(input);
 ## setup
 
 - download [`depth_pro.pt`](https://github.com/apple/ml-depth-pro/blob/main/get_pretrained_models.sh) to `assets/model/`
-- `cargo run --bin import`
+- `cargo run --bin import --features import`
 - `cargo run --example inference`
