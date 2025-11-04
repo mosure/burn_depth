@@ -9,8 +9,10 @@ use burn::{
     prelude::*,
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
 };
-use burn_depth_pro::model::depth_pro::layers::encoder::EncoderDebug;
-use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig, HeadDebug};
+use burn_depth_pro::{
+    inference::rgb_to_input_tensor,
+    model::depth_pro::{DepthPro, DepthProConfig, HeadDebug, layers::encoder::EncoderDebug},
+};
 use image::GenericImageView;
 use safetensors::tensor::{SafeTensors, TensorView};
 
@@ -239,23 +241,8 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
 
     let width = orig_width as usize;
     let height = orig_height as usize;
-    let hw = width * height;
-    let mut data = vec![0.0f32; 3 * hw];
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let base = y as usize * width + x as usize;
-        for channel in 0..3 {
-            let value = pixel[channel] as f32 / 255.0;
-            data[channel * hw + base] = value * 2.0 - 1.0;
-        }
-    }
-
-    let input: Tensor<CorrectnessBackend, 4> =
-        Tensor::<CorrectnessBackend, 1>::from_floats(data.as_slice(), &device).reshape([
-            1,
-            3,
-            height as usize,
-            width as usize,
-        ]);
+    let input = rgb_to_input_tensor::<CorrectnessBackend>(image.as_raw(), width, height, &device)
+        .map_err(|err| format!("failed to prepare input tensor: {err}"))?;
 
     let mut feature_input = input.clone();
     let img_size = model.img_size();

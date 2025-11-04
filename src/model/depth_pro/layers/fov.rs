@@ -6,7 +6,10 @@ use burn::{
     prelude::*,
 };
 
-use crate::model::{depth_pro::resize_bilinear_scale, dino::DinoVisionTransformer};
+use crate::model::{
+    depth_pro::{resize_bilinear_align_corners_false, resize_bilinear_scale},
+    dino::DinoVisionTransformer,
+};
 use burn::tensor::activation::relu;
 
 #[derive(Module, Debug)]
@@ -36,6 +39,11 @@ impl<B: Backend> ConvActivation<B> {
     fn forward(&self, x: Tensor<B, 4>) -> Tensor<B, 4> {
         let out = self.conv.forward(x);
         if self.with_relu { relu(out) } else { out }
+    }
+
+    fn kernel_size(&self) -> [usize; 2] {
+        let dims: [usize; 4] = self.conv.weight.val().shape().dims();
+        [dims[2], dims[3]]
     }
 }
 
@@ -217,8 +225,20 @@ impl<B: Backend> FOVNetwork<B> {
 
     fn apply_blocks(&self, blocks: &[ConvActivation<B>], mut x: Tensor<B, 4>) -> Tensor<B, 4> {
         for block in blocks {
+            let kernel = block.kernel_size();
+            x = Self::ensure_min_spatial(x, kernel);
             x = block.forward(x);
         }
         x
+    }
+
+    fn ensure_min_spatial(tensor: Tensor<B, 4>, min: [usize; 2]) -> Tensor<B, 4> {
+        let dims: [usize; 4] = tensor.shape().dims();
+        if dims[2] >= min[0] && dims[3] >= min[1] {
+            tensor
+        } else {
+            let target = [dims[2].max(min[0]), dims[3].max(min[1])];
+            resize_bilinear_align_corners_false(tensor, target)
+        }
     }
 }

@@ -7,6 +7,7 @@
 burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 
 
+| input               | metric depth               |
 |-----------------------|-----------------------|
 | ![Alt text](./assets/image/test.jpg)    | ![Alt text](./docs/test_depth.png)    |
 

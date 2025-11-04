@@ -4,13 +4,16 @@ use std::{fs, path::Path};
 
 #[allow(unused_imports)]
 use burn::{
-    backend::{Cuda, NdArray},
+    backend::Cuda,
     module::Module,
     nn::interpolate::InterpolateMode,
     prelude::*,
     record::{FullPrecisionSettings, NamedMpkFileRecorder},
 };
-use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
+use burn_depth_pro::{
+    inference::infer_from_rgb,
+    model::depth_pro::{DepthPro, DepthProConfig},
+};
 use image::GenericImageView;
 
 type InferenceBackend = Cuda<f32>;
@@ -38,29 +41,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| format!("Failed to load image `{}`: {err}", image_path.display()))?;
 
     let (orig_width, orig_height) = image.dimensions();
-    let image = image.to_rgb8();
-
+    let rgb = image.to_rgb8();
     let width = orig_width as usize;
     let height = orig_height as usize;
-    let hw = width * height;
-    let mut data = vec![0.0f32; 3 * hw];
-    for (x, y, pixel) in image.enumerate_pixels() {
-        let base = y as usize * width + x as usize;
-        for channel in 0..3 {
-            let value = pixel[channel] as f32 / 255.0;
-            data[channel * hw + base] = value * 2.0 - 1.0;
-        }
-    }
 
-    let input: Tensor<InferenceBackend, 4> =
-        Tensor::<InferenceBackend, 1>::from_floats(data.as_slice(), &device).reshape([
-            1,
-            3,
-            orig_height as usize,
-            orig_width as usize,
-        ]);
-
-    let result = model.infer(input, None, InterpolateMode::Linear);
+    let result = infer_from_rgb::<InferenceBackend>(
+        &model,
+        rgb.as_raw(),
+        width,
+        height,
+        &device,
+        None,
+        InterpolateMode::Linear,
+    )
+    .map_err(|err| format!("Failed to run inference: {err}"))?;
 
     let depth_data = result.depth.clone().into_data().convert::<f32>();
     let shape = depth_data.shape.clone();
