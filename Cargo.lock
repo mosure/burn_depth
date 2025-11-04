@@ -898,7 +898,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "burn_depth_pro"
+name = "burn_depth"
 version = "0.1.0"
 dependencies = [
  "burn",

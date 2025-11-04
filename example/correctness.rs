@@ -3,20 +3,18 @@
 use std::{convert::TryInto, f32::consts::PI, path::Path};
 
 use burn::{
-    backend::Cuda,
-    module::Module,
+    backend::NdArray,
     nn::interpolate::{Interpolate2dConfig, InterpolateMode},
     prelude::*,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
 };
-use burn_depth_pro::{
+use burn_depth::{
     inference::rgb_to_input_tensor,
-    model::depth_pro::{DepthPro, DepthProConfig, HeadDebug, layers::encoder::EncoderDebug},
+    model::depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
 };
 use image::GenericImageView;
 use safetensors::tensor::{SafeTensors, TensorView};
 
-type CorrectnessBackend = Cuda<f32>;
+type CorrectnessBackend = NdArray<f32>;
 
 #[derive(Clone)]
 struct FeatureTensor {
@@ -229,10 +227,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
     let device = <CorrectnessBackend as Backend>::Device::default();
     let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
-    let model = DepthPro::<CorrectnessBackend>::new(&device, DepthProConfig::default());
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model = model
-        .load_file(checkpoint, &recorder, &device)
+    let model = DepthPro::<CorrectnessBackend>::load(&device, checkpoint)
         .map_err(|err| format!("failed to load checkpoint: {err}"))?;
 
     let image = image::open(image_path)?;
@@ -458,10 +453,7 @@ fn compare_decoder_with_reference(
     let device = <CorrectnessBackend as Backend>::Device::default();
     let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
-    let base_model = DepthPro::<CorrectnessBackend>::new(&device, DepthProConfig::default());
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model = base_model
-        .load_file(checkpoint, &recorder, &device)
+    let model = DepthPro::<CorrectnessBackend>::load(&device, checkpoint)
         .map_err(|err| format!("failed to load checkpoint for decoder replay: {err}"))?;
 
     let mut encoder_inputs = Vec::with_capacity(torch_reference.encoder_features.len());

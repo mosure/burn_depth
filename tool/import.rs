@@ -8,7 +8,7 @@ use burn::{
     module::Module,
     record::{FullPrecisionSettings, NamedMpkFileRecorder, Record},
 };
-use burn_depth_pro::model::depth_pro::{DepthPro, DepthProConfig};
+use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
 use burn_store::{
     ApplyResult, ModuleSnapshot, TensorSnapshot,
     pytorch::{PytorchReader, PytorchStore},

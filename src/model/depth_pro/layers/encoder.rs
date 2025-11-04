@@ -200,7 +200,7 @@ impl<B: Backend> DepthProEncoder<B> {
         let steps = if patch_size >= image_size {
             1
         } else {
-            (image_size - patch_size + patch_stride - 1) / patch_stride + 1
+            1 + (image_size - patch_size).div_ceil(patch_stride)
         };
 
         let mut patches = Vec::with_capacity(steps * steps);
@@ -372,9 +372,6 @@ impl<B: Backend> DepthProEncoder<B> {
 
         let high_padding = x0_split.feature_padding(self.out_size);
         let mid_padding = x1_split.feature_padding(self.out_size);
-        if cfg!(debug_assertions) {
-            println!("Encoder padding: high={high_padding}, mid={mid_padding}");
-        }
 
         let latent0_tokens_clone = latent0_encodings.clone();
         let latent1_tokens_clone = latent1_encodings.clone();

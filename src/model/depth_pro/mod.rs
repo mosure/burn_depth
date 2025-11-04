@@ -1,10 +1,11 @@
 use burn::{
-    module::Param,
+    module::{Module, Param},
     nn::{
         conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
         interpolate::InterpolateMode,
     },
     prelude::*,
+    record::{FullPrecisionSettings, NamedMpkFileRecorder, RecorderError},
 };
 
 pub mod layers {
@@ -23,6 +24,14 @@ use layers::{
     fov::FOVNetwork,
     vit::{DINOV2_L16_384, create_vit},
 };
+
+pub type ForwardDecoderOutputs<B> = (
+    Tensor<B, 4>,
+    Tensor<B, 4>,
+    Tensor<B, 4>,
+    Vec<Tensor<B, 4>>,
+    Option<Tensor<B, 1>>,
+);
 
 #[derive(Config, Debug)]
 pub struct DepthProConfig {
@@ -166,42 +175,49 @@ impl<B: Backend> DepthPro<B> {
         }
     }
 
-    fn forward_internal(
-        &self,
-        x: Tensor<B, 4>,
-    ) -> (
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Vec<Tensor<B, 4>>,
-        Option<Tensor<B, 1>>,
-    ) {
+    pub fn load(
+        device: &B::Device,
+        checkpoint_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, RecorderError> {
+        Self::load_with_config(device, DepthProConfig::default(), checkpoint_path)
+    }
+
+    pub fn load_with_config(
+        device: &B::Device,
+        config: DepthProConfig,
+        checkpoint_path: impl AsRef<std::path::Path>,
+    ) -> Result<Self, RecorderError> {
+        let checkpoint_path = checkpoint_path.as_ref();
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        Self::new(device, config).load_file(checkpoint_path, &recorder, device)
+    }
+
+    fn forward_internal(&self, x: Tensor<B, 4>) -> ForwardDecoderOutputs<B> {
         let encodings = self.encoder.forward(x.clone());
         let (features, lowres_features, fusion_outputs) =
             self.decoder.forward_with_debug(&encodings);
         let decoder_features = features.clone();
         let decoder_lowres_features = lowres_features.clone();
-        if cfg!(debug_assertions) {
-            if let Ok(stats) = features
-                .clone()
-                .into_data()
-                .convert::<f32>()
-                .to_vec::<f32>()
-            {
-                let mut min_v = f32::INFINITY;
-                let mut max_v = f32::NEG_INFINITY;
-                let mut sum_v = 0.0f32;
-                for value in &stats {
-                    min_v = min_v.min(*value);
-                    max_v = max_v.max(*value);
-                    sum_v += *value;
-                }
-                let mean_v = sum_v / stats.len() as f32;
-                println!(
-                    "Burn decoder feature stats: min={min_v:.6}, max={max_v:.6}, mean={mean_v:.6}"
-                );
-            }
-        }
+        // if cfg!(debug_assertions)
+        //     && let Ok(stats) = features
+        //         .clone()
+        //         .into_data()
+        //         .convert::<f32>()
+        //         .to_vec::<f32>()
+        // {
+        //     let mut min_v = f32::INFINITY;
+        //     let mut max_v = f32::NEG_INFINITY;
+        //     let mut sum_v = 0.0f32;
+        //     for value in &stats {
+        //         min_v = min_v.min(*value);
+        //         max_v = max_v.max(*value);
+        //         sum_v += *value;
+        //     }
+        //     let mean_v = sum_v / stats.len() as f32;
+        //     println!(
+        //         "Burn decoder feature stats: min={min_v:.6}, max={max_v:.6}, mean={mean_v:.6}"
+        //     );
+        // }
         let canonical_inverse_depth = self.head.forward(features);
 
         let fov = self.fov.as_ref().map(|fov| {
@@ -251,16 +267,7 @@ impl<B: Backend> DepthPro<B> {
         (canonical, fov)
     }
 
-    pub fn forward_with_decoder(
-        &self,
-        x: Tensor<B, 4>,
-    ) -> (
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Tensor<B, 4>,
-        Vec<Tensor<B, 4>>,
-        Option<Tensor<B, 1>>,
-    ) {
+    pub fn forward_with_decoder(&self, x: Tensor<B, 4>) -> ForwardDecoderOutputs<B> {
         self.forward_internal(x)
     }
 

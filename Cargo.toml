@@ -1,5 +1,5 @@
 [package]
-name = "burn_depth_pro"
+name = "burn_depth"
 description = "burn depth pro model inference"
 version = "0.1.0"
 edition = "2024"
@@ -13,8 +13,8 @@ keywords = [
 categories = [
   "computer-vision",
 ]
-homepage = "https://github.com/mosure/burn_depth_pro"
-repository = "https://github.com/mosure/burn_depth_pro"
+homepage = "https://github.com/mosure/burn_depth"
+repository = "https://github.com/mosure/burn_depth"
 readme = "README.md"
 exclude = [
   ".devcontainer",
@@ -29,7 +29,7 @@ exclude = [
 
 [features]
 default = [
-  # "backend_fusion",
+  "backend_fusion",
   "backend_ndarray",
 ]
 
@@ -37,6 +37,7 @@ import = ["burn-import", "burn-store", "clap", "serde"]
 
 backend_cuda =["burn/cuda"]
 backend_fusion = ["burn/fusion"]
+backend_llvm = ["burn/cpu"]
 backend_ndarray = ["burn/ndarray"]
 backend_wgpu = ["burn/wgpu"]
 
@@ -56,13 +57,13 @@ version = "0.19"
 default-features = true
 features = [
   # "autotune",
-  "cuda",
-  "fusion",
-  "ndarray",
+  # "cuda",
+  # "fusion",
+  # "ndarray",
   "std",
   # "vulkan",
   # "webgpu",
-  "wgpu",
+  # "wgpu",
 ]
 
 # [dependencies.burn-wgpu]

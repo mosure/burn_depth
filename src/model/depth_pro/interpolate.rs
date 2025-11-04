@@ -59,8 +59,8 @@ pub fn resize_bilinear_align_corners_false<B: Backend>(
 
     for b in 0..batch {
         for c in 0..channels {
-            let input_offset = ((b * channels + c) * in_height * in_width) as usize;
-            let output_offset = ((b * channels + c) * out_height * out_width) as usize;
+            let input_offset = (b * channels + c) * in_height * in_width;
+            let output_offset = (b * channels + c) * out_height * out_width;
 
             for oy in 0..out_height {
                 let in_y = (oy as f32 + 0.5) * scale_y - 0.5;
@@ -74,9 +74,6 @@ pub fn resize_bilinear_align_corners_false<B: Backend>(
                         in_x,
                         in_y,
                     );
-                    if b == 0 && c == 0 && oy == 1303 && ox == 1005 {
-                        println!("Debug bilinear sample in_y={in_y}, in_x={in_x}, value={value}");
-                    }
                     output[output_offset + oy * out_width + ox] = value;
                 }
             }

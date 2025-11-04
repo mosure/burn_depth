@@ -6,22 +6,40 @@ pub mod model;
 #[cfg(test)]
 mod tests {
     use super::model::depth_pro::{DepthPro, DepthProConfig, layers::vit::DINOV2_L16_128};
+
+    #[cfg(feature = "backend_cuda")]
+    use burn::backend::Cuda as CudaBackend;
+
+    #[cfg(feature = "backend_ndarray")]
+    use burn::backend::NdArray as NdArrayBackend;
+
+    #[cfg(feature = "backend_wgpu")]
     use burn::backend::{
-        Cuda as CudaBackend, NdArray as NdArrayBackend, Wgpu,
+        Wgpu as WgpuBackend,
         wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup},
     };
+
     use burn::{nn::interpolate::InterpolateMode, prelude::*};
-    use half::f16;
     use std::any::type_name;
     use std::panic::{self, AssertUnwindSafe};
+
+    #[cfg(feature = "backend_wgpu")]
     use std::sync::OnceLock;
+    #[cfg(feature = "backend_wgpu")]
     use wgpu::Features;
 
+    #[cfg(feature = "backend_wgpu")]
+    use half::f16;
+
+    #[cfg(feature = "backend_wgpu")]
     type WgpuHalfBackend = Wgpu<f16>;
+    #[cfg(feature = "backend_wgpu")]
     type WgpuF32Backend = Wgpu<f32>;
 
+    #[cfg(feature = "backend_wgpu")]
     static WGPU_FEATURES: OnceLock<Result<Features, String>> = OnceLock::new();
 
+    #[cfg(feature = "backend_wgpu")]
     fn ensure_wgpu_runtime() -> Result<Features, String> {
         WGPU_FEATURES
             .get_or_init(|| {
@@ -36,6 +54,7 @@ mod tests {
             .clone()
     }
 
+    #[cfg(feature = "backend_wgpu")]
     fn init_wgpu_f16_device() -> Result<<WgpuHalfBackend as Backend>::Device, String> {
         let features = ensure_wgpu_runtime()?;
 
@@ -46,11 +65,13 @@ mod tests {
         Ok(<WgpuHalfBackend as Backend>::Device::default())
     }
 
+    #[cfg(feature = "backend_wgpu")]
     fn init_wgpu_f32_device() -> Result<<WgpuF32Backend as Backend>::Device, String> {
         ensure_wgpu_runtime()?;
         Ok(<WgpuF32Backend as Backend>::Device::default())
     }
 
+    #[cfg(feature = "backend_cuda")]
     fn init_cuda_device() -> Result<<CudaBackend<f32> as Backend>::Device, String> {
         panic::catch_unwind(AssertUnwindSafe(|| {
             <CudaBackend<f32> as Backend>::Device::default()
@@ -58,6 +79,7 @@ mod tests {
         .map_err(|_| "CUDA runtime unavailable on this system.".to_string())
     }
 
+    #[cfg(feature = "backend_ndarray")]
     fn init_ndarray_device() -> Result<<NdArrayBackend<f32> as Backend>::Device, String> {
         Ok(<NdArrayBackend<f32> as Backend>::Device::default())
     }
@@ -86,6 +108,7 @@ mod tests {
         })
     }
 
+    #[allow(dead_code)]
     #[derive(Clone, Copy)]
     enum Availability {
         Optional(&'static str),
@@ -157,10 +180,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_wgpu"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
-    )]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_initializes_wgpu_f16() {
         run_initializes_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
@@ -169,10 +189,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_wgpu"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
-    )]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_roundtrip_record_wgpu_f16() {
         run_roundtrip_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
@@ -181,6 +198,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_initializes_wgpu_f32() {
         run_initializes_test::<WgpuF32Backend, _>(
             init_wgpu_f32_device,
@@ -189,6 +207,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_roundtrip_record_wgpu_f32() {
         run_roundtrip_test::<WgpuF32Backend, _>(
             init_wgpu_f32_device,
@@ -197,10 +216,8 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
-    )]
+    #[cfg(feature = "backend_cuda")]
+
     fn depth_pro_initializes_cuda() {
         run_initializes_test::<CudaBackend<f32>, _>(
             init_cuda_device,
@@ -209,10 +226,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
-    )]
+    #[cfg(feature = "backend_cuda")]
     fn depth_pro_roundtrip_record_cuda() {
         run_roundtrip_test::<CudaBackend<f32>, _>(
             init_cuda_device,
@@ -221,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_ndarray")]
     fn depth_pro_initializes_ndarray() {
         run_initializes_test::<NdArrayBackend<f32>, _>(
             init_ndarray_device,
@@ -229,6 +244,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_ndarray")]
     fn depth_pro_roundtrip_record_ndarray() {
         run_roundtrip_test::<NdArrayBackend<f32>, _>(
             init_ndarray_device,
@@ -237,10 +253,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_wgpu"),
-        ignore = "requires adapter exposing SHADER_F16; enable with `--features backend_wgpu`"
-    )]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_infers_wgpu_f16() {
         run_inference_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
@@ -249,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_wgpu")]
     fn depth_pro_infers_wgpu_f32() {
         run_inference_test::<WgpuF32Backend, _>(
             init_wgpu_f32_device,
@@ -257,10 +271,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(
-        not(feature = "backend_cuda"),
-        ignore = "requires CUDA runtime; enable with `--features backend_cuda`"
-    )]
+    #[cfg(feature = "backend_cuda")]
     fn depth_pro_infers_cuda() {
         run_inference_test::<CudaBackend<f32>, _>(
             init_cuda_device,
@@ -269,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "backend_ndarray")]
     fn depth_pro_infers_ndarray() {
         run_inference_test::<NdArrayBackend<f32>, _>(
             init_ndarray_device,

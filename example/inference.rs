@@ -3,20 +3,11 @@
 use std::{fs, path::Path};
 
 #[allow(unused_imports)]
-use burn::{
-    backend::Cuda,
-    module::Module,
-    nn::interpolate::InterpolateMode,
-    prelude::*,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
-};
-use burn_depth_pro::{
-    inference::infer_from_rgb,
-    model::depth_pro::{DepthPro, DepthProConfig},
-};
+use burn::{backend::NdArray, nn::interpolate::InterpolateMode, prelude::*};
+use burn_depth::{inference::infer_from_rgb, model::depth_pro::DepthPro};
 use image::GenericImageView;
 
-type InferenceBackend = Cuda<f32>;
+type InferenceBackend = NdArray<f32>;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = <InferenceBackend as Backend>::Device::default();
@@ -30,10 +21,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let model = DepthPro::<InferenceBackend>::new(&device, DepthProConfig::default());
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model = model
-        .load_file(checkpoint_path, &recorder, &device)
+    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint_path)
         .map_err(|err| format!("Failed to load checkpoint: {err}"))?;
 
     let image_path = Path::new("assets/image/test.jpg");
