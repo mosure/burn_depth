@@ -443,9 +443,9 @@ impl<B: Backend> DepthProEncoder<B> {
 mod tests {
     use super::*;
     use crate::model::depth_pro::layers::vit::{DINOV2_L16_128, create_vit};
-    use burn::backend::NdArray;
 
-    type TestBackend = NdArray<f32>;
+    type TestBackend = crate::InferenceBackend;
+
 
     fn build_encoder(
         device: &<TestBackend as Backend>::Device,

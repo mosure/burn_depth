@@ -6,7 +6,7 @@ use std::{
 
 use burn::{
     module::Module,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder, Record},
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder, Record},
 };
 use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
 use burn_store::{
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output_path = PathBuf::from(OUTPUT_PATH);
     model.clone().save_file(
         output_path.clone(),
-        &NamedMpkFileRecorder::<FullPrecisionSettings>::new(),
+        &NamedMpkFileRecorder::<HalfPrecisionSettings>::new(),
     )?;
 
     println!("Saved Burn checkpoint to {}", output_path.display());
@@ -76,7 +76,7 @@ fn dump_template(model: DepthPro<Backend>) -> Result<(), Box<dyn std::error::Err
     print_type_of(&record, "Record type");
     print_type_of(&record.encoder, "Encoder record type");
     print_type_of(&record.encoder.patch_encoder, "Patch encoder record type");
-    let mut value = serde_json::to_value(&record.into_item::<FullPrecisionSettings>())?;
+    let mut value = serde_json::to_value(&record.into_item::<HalfPrecisionSettings>())?;
     prune_bytes(&mut value);
 
     let mut paths = Vec::new();

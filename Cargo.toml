@@ -29,19 +29,27 @@ exclude = [
 
 [features]
 default = [
-  # "backend_cpu",
   # "backend_fusion",
+  # "backend_cpu",
 
-  "backend_ndarray",
+  "backend_cuda",
+
+  # "backend_ndarray",
 ]
 
-import = ["burn-import", "burn-store", "clap", "serde"]
+import = [
+  "backend_ndarray",
+  "burn-import",
+  "burn-store",
+  "clap",
+  "serde",
+]
 
 # note: one-hot requirement
 backend_cpu = ["burn/cpu"]
 backend_cuda =["burn/cuda"]
 backend_fusion = ["burn/fusion"]
-backend_ndarray = ["burn/ndarray", "burn/simd"]
+backend_ndarray = ["burn/ndarray"]
 backend_wgpu = ["burn/wgpu"]
 
 

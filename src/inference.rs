@@ -64,9 +64,8 @@ pub fn infer_from_rgb<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
 
-    type TestBackend = NdArray<f32>;
+    type TestBackend = crate::InferenceBackend;
 
     #[test]
     fn rgb_to_input_tensor_normalizes_channels() {
