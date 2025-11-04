@@ -3,7 +3,9 @@
 use burn::prelude::*;
 use burn_depth::{
     InferenceBackend,
-    model::depth_pro::{DepthPro, DepthProConfig},
+    model::depth_pro::{
+        DepthPro, DepthProConfig,
+    },
 };
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -15,6 +17,7 @@ criterion_group! {
     targets = inference_benchmark,
 }
 criterion_main!(depth_pro_benchmarks);
+
 
 fn inference_benchmark(c: &mut Criterion) {
     let device = <InferenceBackend as Backend>::Device::default();

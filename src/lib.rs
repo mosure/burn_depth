@@ -3,7 +3,6 @@
 pub mod inference;
 pub mod model;
 
-
 #[cfg(feature = "backend_cpu")]
 use burn::backend::Cpu;
 
@@ -13,7 +12,6 @@ use burn::backend::Cuda;
 #[cfg(feature = "backend_ndarray")]
 use burn::backend::NdArray;
 
-
 #[cfg(feature = "backend_cpu")]
 pub type InferenceBackend = Cpu;
 
@@ -22,7 +20,6 @@ pub type InferenceBackend = Cuda;
 
 #[cfg(feature = "backend_ndarray")]
 pub type InferenceBackend = NdArray;
-
 
 #[cfg(test)]
 mod tests {

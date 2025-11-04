@@ -1,10 +1,11 @@
 use burn::{
+    module::Ignored,
     nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
     prelude::*,
 };
 
 use crate::model::{
-    depth_pro::{layers::vit::ViTConfig, resize_bilinear_scale},
+    depth_pro::{InterpolationMethod, layers::vit::ViTConfig, resize_bilinear_scale},
     dino::DinoVisionTransformer,
 };
 
@@ -101,6 +102,7 @@ pub struct DepthProEncoder<B: Backend> {
     upsample2: ProjectUpsampleBlock<B>,
     upsample_lowres: ConvTranspose2d<B>,
     fuse_lowres: Conv2d<B>,
+    interpolation: Ignored<InterpolationMethod>,
 }
 
 pub struct EncoderDebug<B: Backend> {
@@ -131,6 +133,7 @@ impl<B: Backend> DepthProEncoder<B> {
         image_encoder: DinoVisionTransformer<B>,
         hook_block_ids: Vec<usize>,
         decoder_features: usize,
+        interpolation: InterpolationMethod,
     ) -> Self {
         let out_size = patch_config.grid_size();
         let patch_window_size = patch_config.img_size;
@@ -178,6 +181,7 @@ impl<B: Backend> DepthProEncoder<B> {
             upsample2,
             upsample_lowres,
             fuse_lowres,
+            interpolation: Ignored(interpolation),
         }
     }
 
@@ -307,8 +311,8 @@ impl<B: Backend> DepthProEncoder<B> {
         let batch_size = dims_root[0];
 
         let x0 = x.clone();
-        let x1 = resize_bilinear_scale(x.clone(), [0.5, 0.5]);
-        let x2 = resize_bilinear_scale(x, [0.25, 0.25]);
+        let x1 = resize_bilinear_scale(x.clone(), [0.5, 0.5], self.interpolation.0);
+        let x2 = resize_bilinear_scale(x, [0.25, 0.25], self.interpolation.0);
 
         let x0_split = self.split(x0, 0.25);
         let x1_split = self.split(x1, 0.5);
@@ -446,7 +450,6 @@ mod tests {
 
     type TestBackend = crate::InferenceBackend;
 
-
     fn build_encoder(
         device: &<TestBackend as Backend>::Device,
     ) -> (DepthProEncoder<TestBackend>, ViTConfig) {
@@ -461,6 +464,7 @@ mod tests {
             image_encoder,
             patch_config.encoder_feature_layer_ids.clone(),
             64,
+            InterpolationMethod::Custom,
         );
 
         (encoder, patch_config)

@@ -1,4 +1,5 @@
 use burn::{
+    module::Ignored,
     nn::{
         Linear, LinearConfig, PaddingConfig2d,
         conv::{Conv2d, Conv2dConfig},
@@ -7,7 +8,7 @@ use burn::{
 };
 
 use crate::model::{
-    depth_pro::{resize_bilinear_align_corners_false, resize_bilinear_scale},
+    depth_pro::{InterpolationMethod, resize_bilinear_align_corners_false, resize_bilinear_scale},
     dino::DinoVisionTransformer,
 };
 use burn::tensor::activation::relu;
@@ -55,6 +56,7 @@ pub struct FOVNetwork<B: Backend> {
     downsample_input_scale: Option<[f32; 2]>,
     downsample_blocks: Vec<ConvActivation<B>>,
     head_blocks: Vec<ConvActivation<B>>,
+    interpolation: Ignored<InterpolationMethod>,
 }
 
 impl<B: Backend> FOVNetwork<B> {
@@ -62,6 +64,7 @@ impl<B: Backend> FOVNetwork<B> {
         device: &B::Device,
         num_features: usize,
         fov_encoder: Option<DinoVisionTransformer<B>>,
+        interpolation: InterpolationMethod,
     ) -> Self {
         let mut downsample_blocks = Vec::new();
         let mut head_blocks = Vec::new();
@@ -159,6 +162,7 @@ impl<B: Backend> FOVNetwork<B> {
             downsample_input_scale,
             downsample_blocks,
             head_blocks,
+            interpolation: Ignored(interpolation),
         }
     }
 
@@ -196,7 +200,7 @@ impl<B: Backend> FOVNetwork<B> {
             .as_ref()
             .expect("FOVNetwork encoder missing projection layer");
 
-        let x = resize_bilinear_scale(x, downsample_scale);
+        let x = resize_bilinear_scale(x, downsample_scale, self.interpolation.0);
         let tokens = encoder.forward(x, None).x_norm_patchtokens;
         let dims: [usize; 3] = tokens.shape().dims();
         let batch = dims[0];
@@ -226,19 +230,19 @@ impl<B: Backend> FOVNetwork<B> {
     fn apply_blocks(&self, blocks: &[ConvActivation<B>], mut x: Tensor<B, 4>) -> Tensor<B, 4> {
         for block in blocks {
             let kernel = block.kernel_size();
-            x = Self::ensure_min_spatial(x, kernel);
+            x = self.ensure_min_spatial(x, kernel);
             x = block.forward(x);
         }
         x
     }
 
-    fn ensure_min_spatial(tensor: Tensor<B, 4>, min: [usize; 2]) -> Tensor<B, 4> {
+    fn ensure_min_spatial(&self, tensor: Tensor<B, 4>, min: [usize; 2]) -> Tensor<B, 4> {
         let dims: [usize; 4] = tensor.shape().dims();
         if dims[2] >= min[0] && dims[3] >= min[1] {
             tensor
         } else {
             let target = [dims[2].max(min[0]), dims[3].max(min[1])];
-            resize_bilinear_align_corners_false(tensor, target)
+            resize_bilinear_align_corners_false(tensor, target, self.interpolation.0)
         }
     }
 }

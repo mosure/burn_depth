@@ -14,7 +14,6 @@ use burn_depth::{
 use image::GenericImageView;
 use safetensors::tensor::{SafeTensors, TensorView};
 
-
 #[derive(Clone)]
 struct FeatureTensor {
     data: Vec<f32>,

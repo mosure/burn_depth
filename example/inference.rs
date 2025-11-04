@@ -3,13 +3,8 @@
 use std::{fs, path::Path};
 
 use burn::prelude::*;
-use burn_depth::{
-    InferenceBackend,
-    inference::infer_from_rgb,
-    model::depth_pro::DepthPro,
-};
+use burn_depth::{InferenceBackend, inference::infer_from_rgb, model::depth_pro::DepthPro};
 use image::GenericImageView;
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let device = <InferenceBackend as Backend>::Device::default();
@@ -35,15 +30,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let width = orig_width as usize;
     let height = orig_height as usize;
 
-    let result = infer_from_rgb::<InferenceBackend>(
-        &model,
-        rgb.as_raw(),
-        width,
-        height,
-        &device,
-        None,
-    )
-    .map_err(|err| format!("Failed to run inference: {err}"))?;
+    let result =
+        infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device, None)
+            .map_err(|err| format!("Failed to run inference: {err}"))?;
 
     let depth_data = result.depth.clone().into_data().convert::<f32>();
     let shape = depth_data.shape.clone();

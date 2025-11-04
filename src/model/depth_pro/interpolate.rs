@@ -1,4 +1,24 @@
-use burn::tensor::{Tensor, backend::Backend};
+use burn::{
+    config::Config,
+    tensor::{
+        Tensor,
+        backend::Backend,
+        module,
+        ops::{InterpolateMode as BurnInterpolateMode, InterpolateOptions},
+    },
+};
+
+#[derive(Config, Debug, Copy, PartialEq, Eq)]
+pub enum InterpolationMethod {
+    Custom,
+    Burn,
+}
+
+impl Default for InterpolationMethod {
+    fn default() -> Self {
+        Self::Custom
+    }
+}
 
 fn compute_output_size(input: usize, scale: f32) -> usize {
     let scaled = (input as f32 * scale).floor() as isize;
@@ -30,7 +50,7 @@ fn bilinear_sample(input: &[f32], in_width: usize, in_height: usize, x: f32, y: 
     top * (1.0 - dy) + bottom * dy
 }
 
-pub fn resize_bilinear_align_corners_false<B: Backend>(
+fn resize_bilinear_align_corners_false_custom<B: Backend>(
     input: Tensor<B, 4>,
     output_size: [usize; 2],
 ) -> Tensor<B, 4> {
@@ -88,9 +108,141 @@ pub fn resize_bilinear_align_corners_false<B: Backend>(
     ])
 }
 
-pub fn resize_bilinear_scale<B: Backend>(input: Tensor<B, 4>, scale: [f32; 2]) -> Tensor<B, 4> {
+fn resize_bilinear_align_corners_false_burn<B: Backend>(
+    input: Tensor<B, 4>,
+    output_size: [usize; 2],
+) -> Tensor<B, 4> {
+    module::interpolate(
+        input,
+        output_size,
+        InterpolateOptions::new(BurnInterpolateMode::Bilinear),
+    )
+}
+
+pub fn resize_bilinear_align_corners_false<B: Backend>(
+    input: Tensor<B, 4>,
+    output_size: [usize; 2],
+    method: InterpolationMethod,
+) -> Tensor<B, 4> {
+    match method {
+        InterpolationMethod::Custom => {
+            resize_bilinear_align_corners_false_custom(input, output_size)
+        }
+        InterpolationMethod::Burn => resize_bilinear_align_corners_false_burn(input, output_size),
+    }
+}
+
+pub fn resize_bilinear_scale<B: Backend>(
+    input: Tensor<B, 4>,
+    scale: [f32; 2],
+    method: InterpolationMethod,
+) -> Tensor<B, 4> {
     let dims = input.shape().dims::<4>();
     let target_height = compute_output_size(dims[2], scale[0]);
     let target_width = compute_output_size(dims[3], scale[1]);
-    resize_bilinear_align_corners_false(input, [target_height, target_width])
+    resize_bilinear_align_corners_false(input, [target_height, target_width], method)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestBackend = crate::InferenceBackend;
+
+    fn tensor_from_values(
+        device: &<TestBackend as Backend>::Device,
+        values: &[f32],
+        shape: [usize; 4],
+    ) -> Tensor<TestBackend, 4> {
+        Tensor::<TestBackend, 1>::from_floats(values, device).reshape([
+            shape[0] as i32,
+            shape[1] as i32,
+            shape[2] as i32,
+            shape[3] as i32,
+        ])
+    }
+
+    #[test]
+    fn align_corners_false_outputs_match_expected() {
+        let device = <TestBackend as Backend>::Device::default();
+        let input = tensor_from_values(&device, &[1.0, 2.0, 3.0, 4.0], [1, 1, 2, 2]);
+        let output_size = [4, 4];
+
+        let custom = resize_bilinear_align_corners_false(
+            input.clone(),
+            output_size,
+            InterpolationMethod::Custom,
+        );
+        let burn = resize_bilinear_align_corners_false(
+            input.clone(),
+            output_size,
+            InterpolationMethod::Burn,
+        );
+
+        let expected_custom = tensor_from_values(
+            &device,
+            &[
+                1.0, 1.25, 1.75, 2.0, //
+                1.5, 1.75, 2.25, 2.5, //
+                2.5, 2.75, 3.25, 3.5, //
+                3.0, 3.25, 3.75, 4.0,
+            ],
+            [1, 1, 4, 4],
+        );
+        let expected_burn = tensor_from_values(
+            &device,
+            &[
+                1.0, 1.3333334, 1.6666666, 2.0, //
+                1.6666666, 2.0, 2.3333333, 2.6666667, //
+                2.3333333, 2.6666667, 3.0, 3.3333333, //
+                3.0, 3.3333333, 3.6666667, 4.0,
+            ],
+            [1, 1, 4, 4],
+        );
+
+        assert!(
+            custom
+                .clone()
+                .all_close(expected_custom, Some(1e-5), Some(1e-5)),
+            "custom interpolation output {custom:?} did not match expected values"
+        );
+        assert!(
+            burn.clone()
+                .all_close(expected_burn, Some(1e-5), Some(1e-5)),
+            "burn interpolation output {burn:?} did not match expected values"
+        );
+        assert!(
+            !custom.all_close(burn, Some(1e-5), Some(1e-5)),
+            "custom and burn interpolation unexpectedly matched exactly"
+        );
+    }
+
+    #[test]
+    fn scale_resize_outputs_match_expected() {
+        let device = <TestBackend as Backend>::Device::default();
+        let input = tensor_from_values(&device, &[4.0, 1.0, 0.0, 2.0], [1, 1, 2, 2]);
+        let scale = [1.5, 0.5];
+
+        let custom = resize_bilinear_scale(input.clone(), scale, InterpolationMethod::Custom);
+        let burn = resize_bilinear_scale(input.clone(), scale, InterpolationMethod::Burn);
+
+        let expected_custom = tensor_from_values(&device, &[2.5, 1.75, 1.0], [1, 1, 3, 1]);
+        let expected_burn = tensor_from_values(&device, &[4.0, 2.0, 0.0], [1, 1, 3, 1]);
+
+        assert!(
+            custom
+                .clone()
+                .all_close(expected_custom, Some(1e-5), Some(1e-5)),
+            "custom scale interpolation output {custom:?} did not match expected values"
+        );
+        assert!(
+            burn.clone()
+                .all_close(expected_burn, Some(1e-5), Some(1e-5)),
+            "burn scale interpolation output {burn:?} did not match expected values"
+        );
+        assert!(
+            !custom.all_close(burn, Some(1e-5), Some(1e-5)),
+            "custom and burn scale interpolation unexpectedly matched exactly"
+        );
+    }
 }

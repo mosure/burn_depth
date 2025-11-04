@@ -32,9 +32,9 @@ default = [
   # "backend_fusion",
   # "backend_cpu",
 
-  "backend_cuda",
+  # "backend_cuda",
 
-  # "backend_ndarray",
+  "backend_ndarray",
 ]
 
 import = [
@@ -130,8 +130,15 @@ path = "example/correctness.rs"
 
 [[bench]]
 name = "inference_benchmark"
-path = "tool/benchmark.rs"
+path = "bench/inference.rs"
 harness = false
+
+
+[[bench]]
+name = "interpolate_benchmark"
+path = "bench/interpolate.rs"
+harness = false
+
 
 [[bin]]
 name = "import"

@@ -1,8 +1,8 @@
 use burn::{
-    module::{Module, Param},
+    module::{Ignored, Module, Param},
     nn::conv::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig},
     prelude::*,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder, RecorderError},
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder, RecorderError},
 };
 
 pub mod layers {
@@ -14,7 +14,9 @@ pub mod layers {
 mod interpolate;
 
 use burn::tensor::activation::relu;
-pub use interpolate::{resize_bilinear_align_corners_false, resize_bilinear_scale};
+pub use interpolate::{
+    InterpolationMethod, resize_bilinear_align_corners_false, resize_bilinear_scale,
+};
 use layers::{
     decoder::MultiresConvDecoder,
     encoder::{DepthProEncoder, EncoderDebug},
@@ -44,6 +46,9 @@ pub struct DepthProConfig {
 
     #[config(default = "true")]
     pub use_fov_head: bool,
+
+    #[config(default = "InterpolationMethod::Custom")]
+    pub interpolation: InterpolationMethod,
 }
 
 impl Default for DepthProConfig {
@@ -55,6 +60,7 @@ impl Default for DepthProConfig {
             checkpoint_uri: None,
             fov_encoder_preset: Some(DINOV2_L16_384.into()),
             use_fov_head: true,
+            interpolation: InterpolationMethod::Custom,
         }
     }
 }
@@ -116,6 +122,7 @@ pub struct DepthPro<B: Backend> {
     decoder: MultiresConvDecoder<B>,
     head: DepthHead<B>,
     fov: Option<FOVNetwork<B>>,
+    interpolation: Ignored<InterpolationMethod>,
 }
 
 pub struct DepthProInference<B: Backend> {
@@ -136,6 +143,7 @@ impl<B: Backend> DepthPro<B> {
     pub fn new(device: &B::Device, config: DepthProConfig) -> Self {
         let (patch_encoder, patch_config) = create_vit(device, &config.patch_encoder_preset);
         let (image_encoder, _) = create_vit(device, &config.image_encoder_preset);
+        let interpolation = config.interpolation;
 
         let fov_encoder = config
             .fov_encoder_preset
@@ -151,6 +159,7 @@ impl<B: Backend> DepthPro<B> {
             image_encoder,
             patch_config.encoder_feature_layer_ids.clone(),
             config.decoder_features,
+            interpolation,
         );
 
         let mut decoder_dims = vec![config.decoder_features];
@@ -162,13 +171,14 @@ impl<B: Backend> DepthPro<B> {
 
         let fov = config
             .use_fov_head
-            .then(|| FOVNetwork::new(device, config.decoder_features, fov_encoder));
+            .then(|| FOVNetwork::new(device, config.decoder_features, fov_encoder, interpolation));
 
         Self {
             encoder,
             decoder,
             head,
             fov,
+            interpolation: Ignored(interpolation),
         }
     }
 
@@ -185,7 +195,7 @@ impl<B: Backend> DepthPro<B> {
         checkpoint_path: impl AsRef<std::path::Path>,
     ) -> Result<Self, RecorderError> {
         let checkpoint_path = checkpoint_path.as_ref();
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
         Self::new(device, config).load_file(checkpoint_path, &recorder, device)
     }
 
@@ -287,11 +297,11 @@ impl<B: Backend> DepthPro<B> {
         self.encoder.forward(x)
     }
 
-    pub fn infer(
-        &self,
-        mut x: Tensor<B, 4>,
-        f_px: Option<Tensor<B, 1>>,
-    ) -> DepthProInference<B> {
+    pub fn interpolation_method(&self) -> InterpolationMethod {
+        self.interpolation.0
+    }
+
+    pub fn infer(&self, mut x: Tensor<B, 4>, f_px: Option<Tensor<B, 1>>) -> DepthProInference<B> {
         let dims: [usize; 4] = x.shape().dims();
         let batch = dims[0];
         let height = dims[2];
@@ -302,6 +312,7 @@ impl<B: Backend> DepthPro<B> {
             x = resize_bilinear_align_corners_false(
                 x,
                 [self.encoder.img_size(), self.encoder.img_size()],
+                self.interpolation.0,
             );
         }
 
@@ -328,7 +339,11 @@ impl<B: Backend> DepthPro<B> {
         let mut inverse_depth = canonical_inverse_depth * ratio;
 
         if resize_needed {
-            inverse_depth = resize_bilinear_align_corners_false(inverse_depth, [height, width]);
+            inverse_depth = resize_bilinear_align_corners_false(
+                inverse_depth,
+                [height, width],
+                self.interpolation.0,
+            );
         }
 
         let depth = inverse_depth.clamp(1e-4, 1e4).recip().squeeze_dim(1);
@@ -354,5 +369,39 @@ pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<
     if dims[0] == expected_out && dims[1] == expected_in {
         let permuted = weight.swap_dims(0, 1);
         conv.weight = Param::from_tensor(permuted);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use layers::vit::DINOV2_L16_128;
+
+    type TestBackend = crate::InferenceBackend;
+
+    fn small_config(interpolation: InterpolationMethod) -> DepthProConfig {
+        DepthProConfig {
+            patch_encoder_preset: DINOV2_L16_128.into(),
+            image_encoder_preset: DINOV2_L16_128.into(),
+            fov_encoder_preset: Some(DINOV2_L16_128.into()),
+            decoder_features: 64,
+            interpolation,
+            ..DepthProConfig::default()
+        }
+    }
+
+    #[test]
+    fn interpolation_method_matches_configuration() {
+        let device = <TestBackend as Backend>::Device::default();
+        let custom_model =
+            DepthPro::<TestBackend>::new(&device, small_config(InterpolationMethod::Custom));
+        let burn_model =
+            DepthPro::<TestBackend>::new(&device, small_config(InterpolationMethod::Burn));
+
+        assert_eq!(
+            custom_model.interpolation_method(),
+            InterpolationMethod::Custom
+        );
+        assert_eq!(burn_model.interpolation_method(), InterpolationMethod::Burn);
     }
 }
