@@ -24,6 +24,6 @@ let depth = model.forward(input);
 
 ## setup
 
-- download `depth_pro.pt` to `assets/model/`
+- download [`depth_pro.pt`](https://github.com/apple/ml-depth-pro/blob/main/get_pretrained_models.sh) to `assets/model/`
 - `cargo run --bin import`
 - `cargo run --example inference`
