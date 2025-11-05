@@ -15,10 +15,20 @@ burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 ## usage
 
 ```rust
-use burn_depth::model::depth_pro::DepthPro;
+use burn::prelude::*;
+use burn_depth::{InferenceBackend, model::depth_pro::DepthPro};
 
-let model = DepthPro::<InferenceBackend>::load("assets/model/depth_pro.mpk")?;
-let depth = model.forward(input);
+// NdArray backend (alternatively: Cuda for GPU, Cpu for CPU-only)
+let device = <InferenceBackend as Backend>::Device::default();
+
+let model = DepthPro::<InferenceBackend>::load(&device, "assets/model/depth_pro.mpk")?;
+
+// Image tensor with shape [1, 3, H, W] (batch, channels, height, width)
+let input: Tensor<InferenceBackend, 4> = Tensor::zeros([1, 3, 512, 512], &device);
+
+let result = model.infer(input, None);
+// result.depth: Tensor<InferenceBackend, 3> with shape [1, H, W]
+// result.focallength_px: Tensor<InferenceBackend, 1> with shape [1]
 ```
 
 
