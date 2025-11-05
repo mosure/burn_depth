@@ -18,7 +18,7 @@ burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 use burn::prelude::*;
 use burn_depth::{InferenceBackend, model::depth_pro::DepthPro};
 
-// NdArray backend (alternatively: Cuda for GPU, Cpu for CPU-only)
+// NdArray backend (alternatively: burn::backend::Cuda, burn::backend::Cpu)
 let device = <InferenceBackend as Backend>::Device::default();
 
 let model = DepthPro::<InferenceBackend>::load(&device, "assets/model/depth_pro.mpk")?;
