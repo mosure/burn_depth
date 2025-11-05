@@ -359,7 +359,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
     let head_pre_out =
         tensor_to_feature(pre_out).map_err(|err| format!("failed to fetch head pre_out: {err}"))?;
 
-    let output = model.infer(input, None);
+    let output = model.infer(input);
     let depth = output
         .depth
         .into_data()

@@ -30,7 +30,7 @@ fn inference_benchmark(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
     group.bench_function("depth_pro_infer", |b| {
         b.iter(|| {
-            let output = model.infer(input.clone(), None);
+            let output = model.infer(input.clone());
             InferenceBackend::sync(&bench_device);
             black_box(output);
         });

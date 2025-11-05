@@ -128,6 +128,8 @@ pub struct DepthPro<B: Backend> {
 pub struct DepthProInference<B: Backend> {
     pub depth: Tensor<B, 3>,
     pub focallength_px: Tensor<B, 1>,
+    pub fovx_deg: Tensor<B, 1>,
+    pub fovy_rad: Tensor<B, 1>,
 }
 
 pub struct HeadDebug<B: Backend> {
@@ -301,7 +303,7 @@ impl<B: Backend> DepthPro<B> {
         self.interpolation.0
     }
 
-    pub fn infer(&self, mut x: Tensor<B, 4>, f_px: Option<Tensor<B, 1>>) -> DepthProInference<B> {
+    pub fn infer(&self, mut x: Tensor<B, 4>) -> DepthProInference<B> {
         let dims: [usize; 4] = x.shape().dims();
         let batch = dims[0];
         let height = dims[2];
@@ -318,13 +320,12 @@ impl<B: Backend> DepthPro<B> {
 
         let (canonical_inverse_depth, fov_deg) = self.forward(x.clone());
 
-        let mut focal_px = if let Some(f_px) = f_px {
-            f_px.reshape([batch as i32, 1])
-        } else {
-            let fov_deg = fov_deg.expect("FOV head required for focal length");
-            let radians = fov_deg.clone() * (core::f32::consts::PI / 180.0);
-            let denom = (radians.clone() * 0.5).tan();
-            let width_tensor = fov_deg.ones_like() * (width as f32 * 0.5);
+        let fovx_deg = fov_deg.expect("FOV head required for focal length");
+        let fovx_rad = fovx_deg.clone() * (core::f32::consts::PI / 180.0);
+
+        let mut focal_px = {
+            let denom = (fovx_rad.clone() * 0.5).tan();
+            let width_tensor = fovx_deg.ones_like() * (width as f32 * 0.5);
             (width_tensor / denom).reshape([batch as i32, 1])
         };
 
@@ -350,10 +351,53 @@ impl<B: Backend> DepthPro<B> {
 
         DepthProInference {
             depth,
+            fovx_deg,
+            fovy_rad: fovy_from_fovx_rad(fovx_rad, height, width),
             focallength_px: focal_px.reshape([batch as i32]),
         }
     }
 }
+
+
+/// fovy = 2 * atan( (H/W) * tan(fovx/2) )
+/// uses raján atan approx on [0,1] with range reduction for |x|>1.
+/// input: fovx_rad (radians), output: fovy_rad (radians).
+pub fn fovy_from_fovx_rad<B: Backend, const D: usize>(
+    fovx_rad: Tensor<B, D>,
+    h: usize,
+    w: usize,
+) -> Tensor<B, D> {
+    let k = 0.273;  // raján constant
+    let pi_over_4 = core::f64::consts::FRAC_PI_4;
+    let pi_over_2 = core::f64::consts::FRAC_PI_2;
+
+    // aspect = H/W
+    let aspect = (h as f64) / (w as f64);
+
+    // t = (H/W) * tan(fovx/2)
+    let t = fovx_rad.mul_scalar(0.5).tan().mul_scalar(aspect);
+
+    // atan(t): range reduction + raján on [0,1]
+    let s = t.clone().sign();
+    let ax = t.abs();
+    let use_inv = ax.clone().greater_elem(1.0).float();         // 1 where |x|>1 else 0
+    let inv = ax.clone().recip();
+    let xr = ax.mul(use_inv.clone().neg().add_scalar(1.0)) // (1-use_inv)*ax
+        .add(inv.mul(use_inv.clone()));             // + use_inv*(1/ax)
+
+    // atan(xr) ≈ xr * (π/4 + k*(1 - xr)), xr∈[0,1]
+    let inner = xr.clone().neg().add_scalar(1.0).mul_scalar(k).add_scalar(pi_over_4);
+    let atan_reduced = xr.mul(inner);
+
+    // undo reduction: atan(ax) = atan_reduced + use_inv * (π/2 - 2*atan_reduced)
+    let delta   = atan_reduced.clone().mul_scalar(2.0).neg().add_scalar(pi_over_2);
+    let atan_ax = atan_reduced.add(delta.mul(use_inv));
+
+    // restore sign and finish
+    let atan_t = atan_ax.mul(s);
+    atan_t.mul_scalar(2.0)
+}
+
 
 pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<B>) {
     let weight = conv.weight.val();
@@ -371,6 +415,7 @@ pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<
         conv.weight = Param::from_tensor(permuted);
     }
 }
+
 
 #[cfg(test)]
 mod tests {

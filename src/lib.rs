@@ -191,7 +191,7 @@ mod tests {
         let model = build_model::<B>(&device);
         let size = model.img_size();
         let input = Tensor::<B, 4>::zeros([1, 3, size, size], &device);
-        let result = model.infer(input, None);
+        let result = model.infer(input);
 
         assert_eq!(result.depth.shape().dims(), [1, size, size]);
         assert_eq!(result.focallength_px.shape().dims(), [1]);

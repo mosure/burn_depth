@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let height = orig_height as usize;
 
     let result =
-        infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device, None)
+        infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device)
             .map_err(|err| format!("Failed to run inference: {err}"))?;
 
     let depth_data = result.depth.clone().into_data().convert::<f32>();
@@ -94,8 +94,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let focal_values = focal_data
         .to_vec::<f32>()
         .map_err(|err| format!("Failed to read focal length tensor: {err:?}"))?;
+    let fovy_values = result.fovy_rad
+        .clone()
+        .into_data()
+        .convert::<f32>()
+        .to_vec::<f32>()
+        .map_err(|err| format!("Failed to read focal length tensor: {err:?}"))?;
     println!("depth shape: {:?}", result.depth.shape());
     println!("focal length (px): {:?}", focal_values);
+    println!("fovy (rad): {:?}", fovy_values);
     println!("Saved normalized depth map to {}", output_path.display());
 
     Ok(())

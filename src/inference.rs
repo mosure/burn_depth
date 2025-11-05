@@ -51,14 +51,13 @@ pub fn rgb_to_input_tensor<B: Backend>(
 /// the preprocessing pipeline.
 pub fn infer_from_rgb<B: Backend>(
     model: &DepthPro<B>,
-    rgb: &[u8],
+    rgb: &[u8],  // TODO: use an image type here
     width: usize,
     height: usize,
     device: &B::Device,
-    focal_length_px: Option<Tensor<B, 1>>,
 ) -> Result<DepthProInference<B>, String> {
     let input = rgb_to_input_tensor::<B>(rgb, width, height, device)?;
-    Ok(model.infer(input, focal_length_px))
+    Ok(model.infer(input))
 }
 
 #[cfg(test)]
