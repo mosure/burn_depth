@@ -91,7 +91,7 @@ futures-intrusive = { version = "0.5.0" }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pollster = { version = "0.4.0" }
 safetensors = "0.6"
-wgpu = "26.0"
+wgpu = "27.0"
 
 
 [patch.crates-io]
