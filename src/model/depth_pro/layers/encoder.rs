@@ -4,10 +4,8 @@ use burn::{
     prelude::*,
 };
 
-use crate::model::{
-    depth_pro::{InterpolationMethod, layers::vit::ViTConfig, resize_bilinear_scale},
-    dino::DinoVisionTransformer,
-};
+use crate::model::depth_pro::{InterpolationMethod, layers::vit::ViTConfig, resize_bilinear_scale};
+use burn_dino::model::dino::DinoVisionTransformer;
 
 #[derive(Clone)]
 struct PatchSplit<B: Backend> {
@@ -132,6 +130,7 @@ impl<B: Backend> DepthProEncoder<B> {
         patch_encoder: DinoVisionTransformer<B>,
         patch_config: &ViTConfig,
         image_encoder: DinoVisionTransformer<B>,
+        image_embed_dim: usize,
         hook_block_ids: Vec<usize>,
         decoder_features: usize,
         interpolation: InterpolationMethod,
@@ -155,12 +154,10 @@ impl<B: Backend> DepthProEncoder<B> {
         let upsample1 = upsample_block(patch_config.embed_dim, dims_encoder[2], 1, None);
         let upsample2 = upsample_block(patch_config.embed_dim, dims_encoder[3], 1, None);
 
-        let upsample_lowres = ConvTranspose2dConfig::new(
-            [image_encoder.embedding_dimension(), dims_encoder[3]],
-            [2, 2],
-        )
-        .with_stride([2, 2])
-        .init(device);
+        let upsample_lowres =
+            ConvTranspose2dConfig::new([image_embed_dim, dims_encoder[3]], [2, 2])
+                .with_stride([2, 2])
+                .init(device);
 
         let fuse_lowres = Conv2dConfig::new([dims_encoder[3] * 2, dims_encoder[3]], [1, 1])
             .with_bias(true)
@@ -339,10 +336,9 @@ impl<B: Backend> DepthProEncoder<B> {
             hook_tokens.len() >= 2,
             "DepthPro encoder expects at least two hook tokens"
         );
-        let patch_output = patch_output.x_norm_patchtokens;
 
         let x_pyramid_encodings =
-            self.reshape_feature(patch_output, self.out_size, self.out_size, 0);
+            self.reshape_feature(patch_output.x_norm_patchtokens, self.out_size, self.out_size, 0);
 
         let len0 = x0_split.tensor.shape().dims::<4>()[0];
         let len1 = x1_split.tensor.shape().dims::<4>()[0];
@@ -455,7 +451,7 @@ mod tests {
         device: &<TestBackend as Backend>::Device,
     ) -> (DepthProEncoder<TestBackend>, ViTConfig) {
         let (patch_encoder, patch_config) = create_vit::<TestBackend>(device, DINOV2_L16_128);
-        let (image_encoder, _) = create_vit::<TestBackend>(device, DINOV2_L16_128);
+        let (image_encoder, image_config) = create_vit::<TestBackend>(device, DINOV2_L16_128);
 
         let encoder = DepthProEncoder::new(
             device,
@@ -463,6 +459,7 @@ mod tests {
             patch_encoder,
             &patch_config,
             image_encoder,
+            image_config.embed_dim,
             patch_config.encoder_feature_layer_ids.clone(),
             64,
             InterpolationMethod::Custom,

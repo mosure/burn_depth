@@ -51,7 +51,7 @@ pub fn rgb_to_input_tensor<B: Backend>(
 /// the preprocessing pipeline.
 pub fn infer_from_rgb<B: Backend>(
     model: &DepthPro<B>,
-    rgb: &[u8],  // TODO: use an image type here
+    rgb: &[u8], // TODO: use an image type here
     width: usize,
     height: usize,
     device: &B::Device,
