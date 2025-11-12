@@ -26,6 +26,12 @@ exclude = [
   "credits",
 ]
 
+[workspace]
+members = [
+  "crates/bevy_burn_depth",
+]
+resolver = "2"
+
 
 [features]
 default = [
