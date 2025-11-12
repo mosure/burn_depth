@@ -7,4 +7,4 @@
 *.ply binary
 *.splat binary
 
-*.lock diff=hidden
+*.lock -diff
