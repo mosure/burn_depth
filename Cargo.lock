@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_burn_depth"
-version = "0.2.0"
+version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_args",

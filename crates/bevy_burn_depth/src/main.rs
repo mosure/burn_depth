@@ -31,7 +31,8 @@ use burn::{
     backend::wgpu::{init_setup_async, Wgpu},
     prelude::*,
 };
-use burn_depth::model::depth_pro::{layers::vit::DINOV2_L16_128, DepthPro, DepthProConfig};
+use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
+use image::RgbImage;
 
 const DEFAULT_CHECKPOINT: &str = "assets/model/depth_pro.mpk";
 const MAX_IN_FLIGHT_TASKS: usize = 1;
@@ -48,6 +49,9 @@ pub struct BevyBurnDepthConfig {
 
     #[arg(long, default_value = DEFAULT_CHECKPOINT)]
     pub checkpoint: PathBuf,
+
+    #[arg(long)]
+    pub image_path: Option<PathBuf>,
 }
 
 impl Default for BevyBurnDepthConfig {
@@ -56,6 +60,7 @@ impl Default for BevyBurnDepthConfig {
             press_esc_to_close: true,
             show_fps: true,
             checkpoint: PathBuf::from(DEFAULT_CHECKPOINT),
+            image_path: None,
         }
     }
 }
@@ -132,14 +137,29 @@ mod io {
 struct DepthModel<B: Backend> {
     device: B::Device,
     model: Arc<Mutex<DepthPro<B>>>,
-    image_size: usize,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct DepthTexture {
     image: Handle<Image>,
     entity: Option<Entity>,
+    width: u32,
+    height: u32,
 }
+
+impl Default for DepthTexture {
+    fn default() -> Self {
+        Self {
+            image: Handle::default(),
+            entity: None,
+            width: 1,
+            height: 1,
+        }
+    }
+}
+
+#[derive(Resource, Default, Clone)]
+struct StaticFrame(Option<Arc<RgbImage>>);
 
 #[derive(Component)]
 struct ProcessDepth(Task<CommandQueue>);
@@ -148,6 +168,7 @@ fn process_frames(
     mut commands: Commands,
     depth_model: Res<DepthModel<Wgpu>>,
     depth_texture: Res<DepthTexture>,
+    static_frame: Res<StaticFrame>,
     active_tasks: Query<&ProcessDepth>,
 ) {
     let Some(image_entity) = depth_texture.entity else {
@@ -158,7 +179,13 @@ fn process_frames(
         return;
     }
 
-    if let Some(frame) = receive_image() {
+    let frame_source = if let Some(frame) = static_frame.0.as_ref() {
+        Some((**frame).clone())
+    } else {
+        receive_image()
+    };
+
+    if let Some(frame) = frame_source {
         let thread_pool = AsyncComputeTaskPool::get();
         let task_entity = commands.spawn_empty().id();
         let device = depth_model.device.clone();
@@ -168,14 +195,55 @@ fn process_frames(
             let target = image_entity;
             async move {
                 let tensor = process_frame(frame, model.clone(), device.clone()).await;
+                let [tensor_height, tensor_width, _] = tensor.dims();
 
                 let mut queue = CommandQueue::default();
                 queue.push(move |world: &mut World| {
+                    let mut image_handle = None;
                     if let Ok(mut entity) = world.get_entity_mut(target) {
                         if let Some(mut handle) = entity.get_mut::<BevyBurnHandle<Wgpu>>() {
+                            image_handle = Some(handle.bevy_image.clone());
                             handle.tensor = tensor.clone();
                             handle.upload = true;
                         }
+                    }
+
+                    if let Some(handle) = image_handle {
+                        if let Some(mut images) = world.get_resource_mut::<Assets<Image>>() {
+                            let desired = Extent3d {
+                                width: tensor_width as u32,
+                                height: tensor_height as u32,
+                                depth_or_array_layers: 1,
+                            };
+
+                            let needs_resize = images
+                                .get(handle.id())
+                                .map(|image| {
+                                    image.texture_descriptor.size.width != desired.width
+                                        || image.texture_descriptor.size.height != desired.height
+                                })
+                                .unwrap_or(true);
+
+                            if needs_resize {
+                                let (fill_bytes, texture_format, _, texture_usage) =
+                                    depth_image_setup();
+                                let mut replacement = Image::new_fill(
+                                    desired,
+                                    TextureDimension::D2,
+                                    fill_bytes,
+                                    texture_format,
+                                    RenderAssetUsages::RENDER_WORLD,
+                                );
+                                replacement.texture_descriptor.usage |= texture_usage;
+
+                                let _ = images.insert(handle.id(), replacement);
+                            }
+                        }
+                    }
+
+                    if let Some(mut texture_meta) = world.get_resource_mut::<DepthTexture>() {
+                        texture_meta.width = tensor_width as u32;
+                        texture_meta.height = tensor_height as u32;
                     }
 
                     if let Ok(mut tracker) = world.get_entity_mut(task_entity) {
@@ -243,8 +311,8 @@ fn setup_ui(
     mut images: ResMut<Assets<Image>>,
 ) {
     let size = Extent3d {
-        width: depth.image_size as u32,
-        height: depth.image_size as u32,
+        width: depth_texture.width.max(1),
+        height: depth_texture.height.max(1),
         depth_or_array_layers: 1,
     };
 
@@ -276,7 +344,11 @@ fn setup_ui(
                     BevyBurnHandle::<Wgpu> {
                         bevy_image: depth_texture.image.clone(),
                         tensor: Tensor::<Wgpu, 3>::zeros(
-                            [depth.image_size, depth.image_size, 4],
+                            [
+                                depth_texture.height.max(1) as usize,
+                                depth_texture.width.max(1) as usize,
+                                4,
+                            ],
                             &depth.device,
                         ),
                         upload: true,
@@ -410,21 +482,15 @@ fn fps_update_system(
     }
 }
 
-async fn run_app() {
+async fn run_app(args: BevyBurnDepthConfig) {
     log("running app...");
-
-    let args = parse_args::<BevyBurnDepthConfig>();
     log(&format!("{args:?}"));
 
     let device = Default::default();
     init_setup_async::<AutoGraphicsApi>(&device, Default::default()).await;
     log("device created");
 
-    let mut config = DepthProConfig::default();
-    config.patch_encoder_preset = DINOV2_L16_128.into();
-    config.image_encoder_preset = DINOV2_L16_128.into();
-    config.fov_encoder_preset = Some(DINOV2_L16_128.into());
-    config.decoder_features = 64;
+    let config = DepthProConfig::default();
 
     log("loading depth model...");
 
@@ -442,13 +508,26 @@ async fn run_app() {
     let image_size = depth.img_size();
     log(&format!("depth model ready (inference resolution: {image_size}px)"));
 
+    let static_frame = args.image_path.as_ref().map(|path| {
+        image::open(path)
+            .unwrap_or_else(|err| panic!("failed to load image `{}`: {err}", path.display()))
+            .to_rgb8()
+    });
+    let static_frame = static_frame.map(Arc::new);
+
+    let mut depth_texture = DepthTexture::default();
+    if let Some(frame) = static_frame.as_ref() {
+        depth_texture.width = frame.width();
+        depth_texture.height = frame.height();
+    }
+
     let mut app = viewer_app(args.clone());
 
-    app.init_resource::<DepthTexture>();
+    app.insert_resource(depth_texture);
+    app.insert_resource(StaticFrame(static_frame.clone()));
     app.insert_resource(DepthModel {
         device: device.clone(),
         model: Arc::new(Mutex::new(depth)),
-        image_size,
     });
 
     app.add_systems(Startup, setup_ui);
@@ -480,15 +559,20 @@ pub fn log(message: &str) {
 fn main() {
     #[cfg(feature = "native")]
     {
-        std::thread::spawn(bevy_burn_depth::platform::camera::native_camera_thread);
-        futures::executor::block_on(run_app());
+        let args = parse_args::<BevyBurnDepthConfig>();
+        if args.image_path.is_none() {
+            std::thread::spawn(bevy_burn_depth::platform::camera::native_camera_thread);
+        }
+        futures::executor::block_on(run_app(args));
     }
 
     #[cfg(target_arch = "wasm32")]
     {
+        let args = parse_args::<BevyBurnDepthConfig>();
+
         #[cfg(debug_assertions)]
         console_error_panic_hook::set_once();
 
-        wasm_bindgen_futures::spawn_local(run_app());
+        wasm_bindgen_futures::spawn_local(run_app(args));
     }
 }
