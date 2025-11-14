@@ -506,7 +506,9 @@ async fn run_app(args: BevyBurnDepthConfig) {
     .await;
 
     let image_size = depth.img_size();
-    log(&format!("depth model ready (inference resolution: {image_size}px)"));
+    log(&format!(
+        "depth model ready (inference resolution: {image_size}px)"
+    ));
 
     let static_frame = args.image_path.as_ref().map(|path| {
         image::open(path)

@@ -156,3 +156,8 @@ harness = false
 name = "import"
 path = "tool/import.rs"
 required-features = ["import"]
+
+[[bin]]
+name = "import_da3"
+path = "tool/import_da3.rs"
+required-features = ["import"]

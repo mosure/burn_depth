@@ -337,8 +337,12 @@ impl<B: Backend> DepthProEncoder<B> {
             "DepthPro encoder expects at least two hook tokens"
         );
 
-        let x_pyramid_encodings =
-            self.reshape_feature(patch_output.x_norm_patchtokens, self.out_size, self.out_size, 0);
+        let x_pyramid_encodings = self.reshape_feature(
+            patch_output.x_norm_patchtokens,
+            self.out_size,
+            self.out_size,
+            0,
+        );
 
         let len0 = x0_split.tensor.shape().dims::<4>()[0];
         let len1 = x1_split.tensor.shape().dims::<4>()[0];

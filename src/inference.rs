@@ -87,12 +87,7 @@ mod tests {
         let values = data.to_vec::<f32>().unwrap();
 
         let expected = [
-            -2.1187758,
-            2.2500000,
-            2.4285715,
-            -2.0357141,
-            0.42649236,
-            0.42649236,
+            -2.1187758, 2.2500000, 2.4285715, -2.0357141, 0.42649236, 0.42649236,
         ];
         assert_eq!(values.len(), expected.len());
         for (value, expected) in values.iter().zip(expected.iter()) {

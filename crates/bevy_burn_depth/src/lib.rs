@@ -1,10 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use burn::prelude::*;
-use burn_depth::{
-    inference::infer_from_rgb,
-    model::depth_pro::DepthPro,
-};
+use burn_depth::{inference::infer_from_rgb, model::depth_pro::DepthPro};
 use image::RgbImage;
 
 pub mod platform;
@@ -20,8 +17,7 @@ pub async fn process_frame<B: Backend>(
 
     let inference = {
         let guard = model.lock().expect("depth model poisoned");
-        infer_from_rgb(&*guard, &pixels, width, height, &device)
-            .expect("failed to run inference")
+        infer_from_rgb(&*guard, &pixels, width, height, &device).expect("failed to run inference")
     };
 
     let depth_map: Tensor<B, 2> = inference.depth.squeeze_dim(0);
@@ -50,11 +46,7 @@ pub async fn process_frame<B: Backend>(
         .reshape([height as i32, width as i32, 1]);
 
     let rgb = Tensor::<B, 3>::cat(
-        vec![
-            normalized.clone(),
-            normalized.clone(),
-            normalized.clone(),
-        ],
+        vec![normalized.clone(), normalized.clone(), normalized.clone()],
         2,
     );
 
