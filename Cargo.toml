@@ -35,12 +35,12 @@ resolver = "2"
 
 [features]
 default = [
-  "backend_fusion",
+  # "backend_fusion",
   # "backend_cpu",
 
-  "backend_cuda",
+  # "backend_cuda",
 
-  # "backend_ndarray",
+  "backend_ndarray",
 ]
 
 import = [
