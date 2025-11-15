@@ -1,6 +1,5 @@
 use burn::prelude::*;
-
-use crate::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
+use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
 
 #[derive(Clone, Debug)]
 pub struct ViTConfig {
@@ -50,18 +49,49 @@ pub fn create_vit<B: Backend>(
     let config = vit_config_from_preset(preset)
         .unwrap_or_else(|| panic!("unsupported ViT preset `{preset}`"));
 
-    let vit = match preset {
-        DINOV2_L16_384 => {
+    let mut builder = match preset {
+        DINOV2_L16_384 | DINOV2_L16_128 => {
             DinoVisionTransformerConfig::vitl(Some(config.img_size), Some(config.patch_size))
-                .init(device)
-        }
-        DINOV2_L16_128 => {
-            DinoVisionTransformerConfig::vitl(Some(config.img_size), Some(config.patch_size))
-                .init(device)
         }
         // Safety: unreachable due to unwrap above.
         _ => unreachable!(),
     };
 
+    builder.block_config.attn.quiet_softmax = false;
+    builder.register_token_count = 0;
+    builder.use_register_tokens = false;
+    builder.normalize_intermediate_tokens = false;
+
+    let vit = builder.init(device);
+
     (vit, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestBackend = crate::InferenceBackend;
+
+    #[test]
+    fn dinov2_patch_count_matches_grid() {
+        let device = <TestBackend as Backend>::Device::default();
+        let (vit, config) = create_vit::<TestBackend>(&device, DINOV2_L16_384);
+        let grid = config.grid_size();
+
+        let input = Tensor::<TestBackend, 4>::ones(
+            [1, config.in_chans, config.img_size, config.img_size],
+            &device,
+        );
+        let output = vit.forward(input, None);
+        let dims: [usize; 3] = output.x_norm_patchtokens.shape().dims();
+
+        assert_eq!(
+            dims[1],
+            grid * grid,
+            "patch tokens ({}) did not match expected grid size ({})",
+            dims[1],
+            grid * grid
+        );
+    }
 }
