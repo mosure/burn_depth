@@ -1,39 +1,189 @@
 #![recursion_limit = "256"]
 
-use std::{fs, path::Path};
+#[path = "common.rs"]
+mod common;
+
+use common::resize_with_bicubic;
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use burn::prelude::*;
-use burn_depth::{InferenceBackend, inference::infer_from_rgb, model::depth_pro::DepthPro};
-use image::GenericImageView;
+use burn_depth::{
+    InferenceBackend,
+    inference::{DepthPrediction, infer_from_rgb},
+    model::{AnyDepthModel, DepthModelKind, depth_anything3::DepthAnything3},
+};
+use clap::{Parser, ValueEnum};
+use image::{GenericImageView, RgbImage};
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Run depth inference using Burn checkpoints.")]
+struct Args {
+    #[arg(long, value_enum, default_value_t = ModelArg::DepthPro)]
+    model: ModelArg,
+
+    #[arg(long, value_name = "PATH")]
+    checkpoint: Option<PathBuf>,
+
+    #[arg(long, value_name = "PATH", default_value = "assets/image/test.jpg")]
+    image: PathBuf,
+
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ModelArg {
+    DepthPro,
+    DepthAnything3,
+}
+
+impl From<ModelArg> for DepthModelKind {
+    fn from(value: ModelArg) -> Self {
+        match value {
+            ModelArg::DepthPro => DepthModelKind::DepthPro,
+            ModelArg::DepthAnything3 => DepthModelKind::DepthAnything3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CropRegion {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+struct PreparedDa3Input {
+    width: usize,
+    height: usize,
+    rgb: RgbImage,
+    crop: Option<CropRegion>,
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
     let device = <InferenceBackend as Backend>::Device::default();
+    let kind: DepthModelKind = args.model.into();
 
-    let checkpoint_path = Path::new("assets/model/depth_pro.mpk");
-    if !checkpoint_path.exists() {
+    let checkpoint = args
+        .checkpoint
+        .unwrap_or_else(|| PathBuf::from(kind.default_checkpoint()));
+    if !checkpoint.exists() {
         return Err(format!(
-            "Checkpoint `{}` not found. Run `cargo run --bin import --features import` first.",
-            checkpoint_path.display()
+            "Checkpoint `{}` not found. Provide --checkpoint or run the appropriate importer first.",
+            checkpoint.display()
         )
         .into());
     }
 
-    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint_path)
-        .map_err(|err| format!("Failed to load checkpoint: {err}"))?;
+    let model = AnyDepthModel::load(kind, &device, &checkpoint)?;
 
-    let image_path = Path::new("assets/image/test.jpg");
-    let image = image::open(image_path)
+    let image_path = args.image;
+    let image = image::open(&image_path)
         .map_err(|err| format!("Failed to load image `{}`: {err}", image_path.display()))?;
-
     let (orig_width, orig_height) = image.dimensions();
-    let rgb = image.to_rgb8();
-    let width = orig_width as usize;
-    let height = orig_height as usize;
+    let base_rgb = image.to_rgb8();
+    let mut crop_region: Option<CropRegion> = None;
+    let (width, height, rgb) = if let Some(da3) = model.as_depth_anything3() {
+        let prepared = prepare_da3_input(&base_rgb, da3)?;
+        crop_region = prepared.crop;
+        (prepared.width, prepared.height, prepared.rgb)
+    } else if let Some(resolution) = model.preferred_input_resolution() {
+        let target = u32::try_from(resolution)
+            .map_err(|_| format!("Model requested resolution {resolution} outside u32 range"))?;
+        let resized = resize_with_bicubic(&base_rgb, target, target)
+            .map_err(|err| format!("Failed to resize image for model input: {err}"))?;
+        (resolution, resolution, resized)
+    } else {
+        (orig_width as usize, orig_height as usize, base_rgb)
+    };
 
-    let result = infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device)
-        .map_err(|err| format!("Failed to run inference: {err}"))?;
+    let result =
+        infer_from_rgb::<InferenceBackend, _>(&model, rgb.as_raw(), width, height, &device)
+            .map_err(|err| format!("Failed to run inference: {err}"))?;
 
-    let depth_data = result.depth.clone().into_data().convert::<f32>();
+    let restore_dims = if width as u32 != orig_width || height as u32 != orig_height {
+        Some((orig_width as usize, orig_height as usize))
+    } else if crop_region.is_some() {
+        Some((orig_width as usize, orig_height as usize))
+    } else {
+        None
+    };
+
+    let depth_path = args
+        .output
+        .unwrap_or_else(|| image_path.with_file_name("depth.png"));
+    save_depth_map(&result, &depth_path, crop_region, restore_dims)?;
+    log_intrinsics(&result);
+    println!(
+        "Model `{}` wrote normalized depth map to {}",
+        kind.as_str(),
+        depth_path.display()
+    );
+    Ok(())
+}
+
+fn prepare_da3_input(
+    base_rgb: &RgbImage,
+    model: &DepthAnything3<InferenceBackend>,
+) -> Result<PreparedDa3Input, String> {
+    let preferred = model.img_size();
+    let (orig_width, orig_height) = (base_rgb.width() as usize, base_rgb.height() as usize);
+
+    if orig_width == preferred && orig_height == preferred {
+        return Ok(PreparedDa3Input {
+            width: preferred,
+            height: preferred,
+            rgb: base_rgb.clone(),
+            crop: None,
+        });
+    }
+
+    let longest = orig_width.max(orig_height).max(1) as f32;
+    let scale = preferred as f32 / longest;
+    let mut resized_width = (orig_width as f32 * scale).round() as usize;
+    let mut resized_height = (orig_height as f32 * scale).round() as usize;
+    resized_width = resized_width.clamp(1, preferred);
+    resized_height = resized_height.clamp(1, preferred);
+
+    let resized = resize_with_bicubic(base_rgb, resized_width as u32, resized_height as u32)
+        .map_err(|err| format!("Failed to resize image for DA3 input: {err}"))?;
+
+    let mut canvas = RgbImage::new(preferred as u32, preferred as u32);
+    let x_offset = (preferred - resized_width) / 2;
+    let y_offset = (preferred - resized_height) / 2;
+    for y in 0..resized_height {
+        for x in 0..resized_width {
+            let pixel = resized.get_pixel(x as u32, y as u32);
+            canvas.put_pixel((x_offset + x) as u32, (y_offset + y) as u32, *pixel);
+        }
+    }
+
+    Ok(PreparedDa3Input {
+        width: preferred,
+        height: preferred,
+        rgb: canvas,
+        crop: Some(CropRegion {
+            x: x_offset,
+            y: y_offset,
+            width: resized_width,
+            height: resized_height,
+        }),
+    })
+}
+
+fn save_depth_map<B: Backend>(
+    prediction: &DepthPrediction<B>,
+    output_path: &Path,
+    crop: Option<CropRegion>,
+    target_dims: Option<(usize, usize)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let depth_data = prediction.depth.clone().into_data().convert::<f32>();
     let shape = depth_data.shape.clone();
     if shape.len() != 3 {
         return Err(format!("Expected depth tensor with 3 dimensions, got {shape:?}.").into());
@@ -45,18 +195,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("Example expects batch size of 1, got {batch}.").into());
     }
 
-    let values = depth_data
+    let mut values = depth_data
         .to_vec::<f32>()
         .map_err(|err| format!("Failed to read depth tensor values: {err:?}"))?;
+    let mut save_width = width;
+    let mut save_height = height;
+
+    if let Some(region) = crop {
+        values = crop_depth_field(&values, save_width, save_height, region)?;
+        save_width = region.width;
+        save_height = region.height;
+    }
+
+    if let Some((target_width, target_height)) = target_dims {
+        if target_width != save_width || target_height != save_height {
+            values = resize_depth_field(
+                &values,
+                save_width,
+                save_height,
+                target_width,
+                target_height,
+            );
+            save_width = target_width;
+            save_height = target_height;
+        }
+    }
     let (mut min_depth, mut max_depth) = (f32::INFINITY, f32::NEG_INFINITY);
     for &value in &values {
         if value.is_finite() {
-            if value < min_depth {
-                min_depth = value;
-            }
-            if value > max_depth {
-                max_depth = value;
-            }
+            min_depth = min_depth.min(value);
+            max_depth = max_depth.max(value);
         }
     }
     if !min_depth.is_finite() || !max_depth.is_finite() {
@@ -76,34 +244,131 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let width_u32 = u32::try_from(width)
-        .map_err(|_| format!("Depth width {width} exceeds supported output range"))?;
-    let height_u32 = u32::try_from(height)
-        .map_err(|_| format!("Depth height {height} exceeds supported output range"))?;
+    let width_u32 = u32::try_from(save_width)
+        .map_err(|_| format!("Depth width {save_width} exceeds valid range"))?;
+    let height_u32 = u32::try_from(save_height)
+        .map_err(|_| format!("Depth height {save_height} exceeds valid range"))?;
     let depth_image = image::GrayImage::from_vec(width_u32, height_u32, pixels)
         .ok_or_else(|| format!("Depth tensor size mismatch {shape:?}"))?;
 
-    let output_path = image_path.with_file_name("test_depth.png");
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    depth_image.save(&output_path)?;
-
-    let focal_data = result.focallength_px.clone().into_data().convert::<f32>();
-    let focal_values = focal_data
-        .to_vec::<f32>()
-        .map_err(|err| format!("Failed to read focal length tensor: {err:?}"))?;
-    let fovy_values = result
-        .fovy_rad
-        .clone()
-        .into_data()
-        .convert::<f32>()
-        .to_vec::<f32>()
-        .map_err(|err| format!("Failed to read focal length tensor: {err:?}"))?;
-    println!("depth shape: {:?}", result.depth.shape());
-    println!("focal length (px): {:?}", focal_values);
-    println!("fovy (rad): {:?}", fovy_values);
-    println!("Saved normalized depth map to {}", output_path.display());
-
+    depth_image.save(output_path)?;
     Ok(())
+}
+
+fn resize_depth_field(
+    values: &[f32],
+    src_width: usize,
+    src_height: usize,
+    dst_width: usize,
+    dst_height: usize,
+) -> Vec<f32> {
+    if src_width == dst_width && src_height == dst_height {
+        return values.to_vec();
+    }
+    let mut output = vec![0.0f32; dst_width * dst_height];
+    let scale_x = if dst_width > 1 {
+        src_width as f32 / dst_width as f32
+    } else {
+        0.0
+    };
+    let scale_y = if dst_height > 1 {
+        src_height as f32 / dst_height as f32
+    } else {
+        0.0
+    };
+
+    for y in 0..dst_height {
+        let src_y = if dst_height > 1 {
+            (y as f32 + 0.5) * scale_y - 0.5
+        } else {
+            0.0
+        };
+        for x in 0..dst_width {
+            let src_x = if dst_width > 1 {
+                (x as f32 + 0.5) * scale_x - 0.5
+            } else {
+                0.0
+            };
+            output[y * dst_width + x] =
+                sample_depth_bilinear(values, src_width, src_height, src_x, src_y);
+        }
+    }
+
+    output
+}
+
+fn sample_depth_bilinear(values: &[f32], width: usize, height: usize, x: f32, y: f32) -> f32 {
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+    let clamp = |value: f32, max: usize| -> usize {
+        if max == 0 {
+            0
+        } else {
+            value.clamp(0.0, max as f32) as usize
+        }
+    };
+
+    let x0 = clamp(x.floor(), width - 1);
+    let y0 = clamp(y.floor(), height - 1);
+    let x1 = clamp(x0 as f32 + 1.0, width - 1);
+    let y1 = clamp(y0 as f32 + 1.0, height - 1);
+
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+
+    let index = |px: usize, py: usize| -> f32 { values[py * width + px] };
+
+    let top = index(x0, y0) * (1.0 - fx) + index(x1, y0) * fx;
+    let bottom = index(x0, y1) * (1.0 - fx) + index(x1, y1) * fx;
+
+    top * (1.0 - fy) + bottom * fy
+}
+
+fn crop_depth_field(
+    values: &[f32],
+    width: usize,
+    height: usize,
+    region: CropRegion,
+) -> Result<Vec<f32>, String> {
+    if region.x + region.width > width || region.y + region.height > height {
+        return Err(format!(
+            "Crop region {:?} exceeds depth tensor bounds {width}x{height}",
+            region
+        ));
+    }
+    let mut output = Vec::with_capacity(region.width * region.height);
+    for row in 0..region.height {
+        let src_y = region.y + row;
+        let start = src_y * width + region.x;
+        output.extend_from_slice(&values[start..start + region.width]);
+    }
+    Ok(output)
+}
+
+fn log_intrinsics<B: Backend>(prediction: &DepthPrediction<B>) {
+    if let Some(focal) = prediction.focallength_px.clone() {
+        let focal_values = focal
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .unwrap_or_default();
+        println!("Focal length (px): {:?}", focal_values);
+    } else {
+        println!("Focal length (px): not provided by this model");
+    }
+
+    if let Some(fovy) = prediction.fovy_rad.clone() {
+        let fovy_values = fovy
+            .into_data()
+            .convert::<f32>()
+            .to_vec::<f32>()
+            .unwrap_or_default();
+        println!("Vertical FOV (rad): {:?}", fovy_values);
+    } else {
+        println!("Vertical FOV (rad): not provided by this model");
+    }
 }

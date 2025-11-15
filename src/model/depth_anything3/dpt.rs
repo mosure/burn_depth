@@ -158,13 +158,20 @@ impl<B: Backend> DepthAnything3Head<B> {
         let batch = dims[0];
         let tokens_per_stage = dims[1];
         let channels = dims[2];
+        let patch_tokens = ph * pw;
+        let end_idx = patch_start_idx + patch_tokens;
 
         assert!(
-            tokens_per_stage >= patch_start_idx + ph * pw,
+            tokens_per_stage >= end_idx,
             "Hook tensor for stage {stage_idx} does not have enough patch tokens"
         );
+        debug_assert_eq!(
+            tokens_per_stage,
+            patch_start_idx + patch_tokens,
+            "Unexpected token count at stage {stage_idx}"
+        );
 
-        let x = tokens.slice([0..batch, patch_start_idx..tokens_per_stage, 0..channels]);
+        let x = tokens.slice([0..batch, patch_start_idx..end_idx, 0..channels]);
 
         let x = x
             .permute([0, 2, 1])

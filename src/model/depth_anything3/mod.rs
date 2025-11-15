@@ -70,6 +70,7 @@ impl<B: Backend> Backbone<B> {
 pub struct DepthAnything3<B: Backend> {
     backbone: Backbone<B>,
     head: DepthAnything3Head<B>,
+    img_size: Ignored<usize>,
     patch_size: Ignored<usize>,
     hook_block_ids: Ignored<Vec<usize>>,
     patch_token_start: Ignored<usize>,
@@ -86,6 +87,7 @@ impl<B: Backend> DepthAnything3<B> {
         Self {
             backbone,
             head,
+            img_size: Ignored(config.image_size),
             patch_size: Ignored(config.patch_size),
             hook_block_ids: Ignored(config.hook_block_ids),
             patch_token_start: Ignored(1),
@@ -126,6 +128,14 @@ impl<B: Backend> DepthAnything3<B> {
             self.patch_size.0,
         );
         DepthAnything3Inference { depth }
+    }
+
+    pub fn img_size(&self) -> usize {
+        self.img_size.0
+    }
+
+    pub fn patch_size(&self) -> usize {
+        self.patch_size.0
     }
 }
 
