@@ -10,6 +10,8 @@ out/
 !tool/*.py
 *.mpk
 
+__pycache__/
+
 *.ply
 *.gcloud
 *.safetensors

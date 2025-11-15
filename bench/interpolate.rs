@@ -3,14 +3,10 @@
 use burn::prelude::*;
 use burn_depth::{
     InferenceBackend,
-    model::depth_pro::{
-        InterpolationMethod,
-        resize_bilinear_align_corners_false,
-    },
+    model::depth_pro::{InterpolationMethod, resize_bilinear_align_corners_false},
 };
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
-
 
 criterion_group! {
     name = interpolation_benchmarks;
@@ -18,7 +14,6 @@ criterion_group! {
     targets = interpolation_benchmark,
 }
 criterion_main!(interpolation_benchmarks);
-
 
 fn interpolation_benchmark(c: &mut Criterion) {
     let device = <InferenceBackend as Backend>::Device::default();

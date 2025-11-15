@@ -7,11 +7,11 @@ use burn::{
     prelude::*,
 };
 
-use crate::model::{
-    depth_pro::{InterpolationMethod, resize_bilinear_align_corners_false, resize_bilinear_scale},
-    dino::DinoVisionTransformer,
+use crate::model::depth_pro::{
+    InterpolationMethod, resize_bilinear_align_corners_false, resize_bilinear_scale,
 };
 use burn::tensor::activation::relu;
+use burn_dino::model::dino::DinoVisionTransformer;
 
 #[derive(Module, Debug)]
 struct ConvActivation<B: Backend> {
@@ -63,7 +63,7 @@ impl<B: Backend> FOVNetwork<B> {
     pub fn new(
         device: &B::Device,
         num_features: usize,
-        fov_encoder: Option<DinoVisionTransformer<B>>,
+        fov_encoder: Option<(DinoVisionTransformer<B>, usize)>,
         interpolation: InterpolationMethod,
     ) -> Self {
         let mut downsample_blocks = Vec::new();
@@ -72,8 +72,7 @@ impl<B: Backend> FOVNetwork<B> {
         let mut downsample_input_scale = None;
         let mut encoder = None;
 
-        if let Some(model) = fov_encoder {
-            let embed_dim = model.embedding_dimension();
+        if let Some((model, embed_dim)) = fov_encoder {
             encoder_proj = Some(LinearConfig::new(embed_dim, num_features / 2).init(device));
             downsample_input_scale = Some([0.25, 0.25]);
 

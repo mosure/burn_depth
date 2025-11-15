@@ -18,7 +18,6 @@ burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 use burn::prelude::*;
 use burn_depth::{InferenceBackend, model::depth_pro::DepthPro};
 
-// NdArray backend (alternatively: burn::backend::Cuda, burn::backend::Cpu)
 let device = <InferenceBackend as Backend>::Device::default();
 
 let model = DepthPro::<InferenceBackend>::load(&device, "assets/model/depth_pro.mpk")?;
@@ -31,9 +30,27 @@ let result = model.infer(input, None);
 // result.focallength_px: Tensor<InferenceBackend, 1> with shape [1]
 ```
 
+### switching between depth_pro and depth anything 3
+
+```bash
+cargo run --example inference -- \
+  --model depth-pro \
+  --checkpoint assets/model/depth_pro.mpk \
+  --image assets/image/test.jpg
+
+cargo run --example inference -- \
+  --model depth-anything3 \
+  --checkpoint assets/model/da3_metric_large.mpk \
+  --image assets/image/test.jpg
+```
+
 
 ## setup
 
 - download [`depth_pro.pt`](https://github.com/apple/ml-depth-pro/blob/main/get_pretrained_models.sh) to `assets/model/`
-- `cargo run --bin import --features import`
-- `cargo run --example inference`
+- `cargo run --bin import_depth_pro --features import`
+
+- download [`da3_metric_large.safetensors`](https://huggingface.co/depth-anything/Depth-Anything-V3) to `assets/model/`
+- `cargo run --bin import_da3 --features import`
+
+- `cargo run --example inference -- --help`
