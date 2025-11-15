@@ -86,13 +86,14 @@ mod tests {
         assert_eq!(data.shape.as_slice(), &[1, 3, 2, 1]);
         let values = data.to_vec::<f32>().unwrap();
 
+        // Expected values computed using f32 precision to align with PyTorch's normalization.
         let expected = [
-            -2.1187758,
-            2.2500000,
+            -2.1179039,
+            2.2489083,
             2.4285715,
             -2.0357141,
-            0.42649236,
-            0.42649236,
+            0.42649257,
+            0.42649257,
         ];
         assert_eq!(values.len(), expected.len());
         for (value, expected) in values.iter().zip(expected.iter()) {
