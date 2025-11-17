@@ -16,7 +16,7 @@ use burn_depth::{
     InferenceBackend,
     inference::rgb_to_input_tensor,
     model::{
-        depth_anything3::{DepthAnything3, DepthAnything3Config},
+        depth_anything3::{with_model_load_stack, DepthAnything3, DepthAnything3Config},
         depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
         prepare_depth_anything3_image,
     },
@@ -975,10 +975,11 @@ fn compute_da3_outputs(
     }
 
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model =
+    let model = with_model_load_stack(|| {
         DepthAnything3::<InferenceBackend>::new(&device, DepthAnything3Config::metric_large())
             .load_file(checkpoint_path, &recorder, &device)
-            .map_err(|err| format!("Failed to load DA3 checkpoint: {err}"))?;
+    })
+    .map_err(|err| format!("Failed to load DA3 checkpoint: {err}"))?;
     let target = model.img_size();
 
     let base_rgb = image::open(image_path)

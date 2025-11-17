@@ -75,9 +75,13 @@ impl<B: Backend> AnyDepthModel<B> {
 
         let mut last_err = None;
         for config in configs {
-            match depth_anything3::DepthAnything3::new(device, config.clone())
-                .load_file(checkpoint, &recorder, device)
-            {
+            let config_clone = config.clone();
+            let recorder_clone = recorder.clone();
+            let attempt = depth_anything3::with_model_load_stack(move || {
+                depth_anything3::DepthAnything3::new(device, config_clone)
+                    .load_file(checkpoint, &recorder_clone, device)
+            });
+            match attempt {
                 Ok(model) => return Ok(Self::DepthAnything3(model)),
                 Err(err) => last_err = Some(err),
             }

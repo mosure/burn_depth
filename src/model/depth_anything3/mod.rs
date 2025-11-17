@@ -17,6 +17,28 @@ pub use dpt::{
     HeadActivation,
 };
 
+mod stack_guard {
+    #[cfg(not(target_arch = "wasm32"))]
+    use stacker::maybe_grow;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_model_load_stack<R>(f: impl FnOnce() -> R) -> R {
+        // Windows threads default to a 1MB stack which isn't enough for DepthAnything3's
+        // checkpoint load graph on the WGPU backend. Borrow a larger stack temporarily
+        // so Module::load_record can recurse safely.
+        const STACK_SIZE: usize = 32 * 1024 * 1024;
+        const RED_ZONE: usize = 2 * 1024 * 1024;
+        maybe_grow(STACK_SIZE, RED_ZONE, f)
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn with_model_load_stack<R>(f: impl FnOnce() -> R) -> R {
+        f()
+    }
+}
+
+pub use stack_guard::with_model_load_stack;
+
 #[derive(Config, Debug)]
 pub struct DepthAnything3Config {
     pub image_size: usize,
@@ -461,6 +483,8 @@ impl<B: Backend> DepthAnything3<B> {
 mod tests {
     use super::*;
     use crate::InferenceBackend;
+    #[cfg(feature = "backend_wgpu")]
+    use burn::record::{FullPrecisionSettings, Record};
 
     #[test]
     fn depth_anything3_emits_depth_tensor() {
@@ -470,5 +494,22 @@ mod tests {
         let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
         let output = model.infer(input);
         assert_eq!(output.depth.shape().dims(), [1, 518, 518]);
+    }
+
+    #[cfg(feature = "backend_wgpu")]
+    #[test]
+    fn depth_anything3_wgpu_record_roundtrip() {
+        type TestBackend = burn::backend::Wgpu<f32>;
+        let device = <TestBackend as Backend>::Device::default();
+        let config = DepthAnything3Config::metric_small();
+        let model = DepthAnything3::<TestBackend>::new(&device, config);
+        let record_item = model
+            .clone()
+            .into_record()
+            .into_item::<FullPrecisionSettings>();
+        let _ = <DepthAnything3<TestBackend> as Module<TestBackend>>::Record::from_item(
+            record_item,
+            &device,
+        );
     }
 }

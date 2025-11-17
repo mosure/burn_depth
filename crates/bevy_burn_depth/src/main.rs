@@ -26,7 +26,8 @@ use bevy::{
 use bevy_args::{parse_args, Deserialize, Parser, Serialize};
 use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use bevy_burn_depth::{platform::camera::receive_image, process_frame};
-use burn::{backend::wgpu::Wgpu, prelude::*};
+use burn::prelude::*;
+use burn_wgpu::Wgpu;
 use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
 use image::RgbImage;
 
@@ -69,7 +70,9 @@ mod io {
         prelude::*,
         record::{FullPrecisionSettings, NamedMpkFileRecorder},
     };
-    use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
+    use burn_depth::model::depth_anything3::{
+        with_model_load_stack, DepthAnything3, DepthAnything3Config,
+    };
 
     pub async fn load_model<B: Backend>(
         config: DepthAnything3Config,
@@ -77,9 +80,10 @@ mod io {
         device: &B::Device,
     ) -> DepthAnything3<B> {
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-        DepthAnything3::new(device, config)
-            .load_file(checkpoint, &recorder, device)
-            .expect("failed to load Depth Anything 3 checkpoint")
+        with_model_load_stack(|| {
+            DepthAnything3::new(device, config).load_file(checkpoint, &recorder, device)
+        })
+        .expect("failed to load Depth Anything 3 checkpoint")
     }
 }
 
@@ -89,7 +93,9 @@ mod io {
         prelude::*,
         record::{FullPrecisionSettings, NamedMpkBytesRecorder},
     };
-    use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
+    use burn_depth::model::depth_anything3::{
+        with_model_load_stack, DepthAnything3, DepthAnything3Config,
+    };
     use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -129,8 +135,10 @@ mod io {
             .load(data, device)
             .expect("failed to decode checkpoint");
 
-        let model = DepthAnything3::new(device, config);
-        model.load_record(record)
+        with_model_load_stack(|| {
+            let model = DepthAnything3::new(device, config);
+            model.load_record(record)
+        })
     }
 }
 
@@ -208,7 +216,12 @@ fn process_frames(
     let Some(burn_device) = burn_device else {
         return;
     };
-    let device = (**burn_device).clone();
+
+    if !burn_device.is_ready() {
+        return;
+    }
+
+    let device = burn_device.device().unwrap().clone();
     let model = model.clone();
 
     let frame_source = if let Some(frame) = static_frame.0.as_ref() {
@@ -313,9 +326,13 @@ fn begin_depth_model_load(
         return;
     };
 
+    if !burn_device.is_ready() {
+        return;
+    }
+
     let checkpoint = depth_model.checkpoint.clone();
     let config = depth_model.config.clone();
-    let device = (**burn_device).clone();
+    let device = burn_device.device().unwrap().clone();
 
     log("loading depth model...");
     log(&format!("checkpoint: {}", checkpoint.display()));
@@ -420,6 +437,10 @@ fn setup_ui(
         return;
     };
 
+    if !burn_device.is_ready() {
+        return;
+    }
+
     let size = Extent3d {
         width: depth_texture.width.max(1),
         height: depth_texture.height.max(1),
@@ -459,7 +480,7 @@ fn setup_ui(
                                 depth_texture.width.max(1) as usize,
                                 4,
                             ],
-                            &(**burn_device),
+                            &burn_device.device().unwrap(),
                         ),
                         upload: true,
                         direction: BindingDirection::BurnToBevy,
@@ -474,6 +495,7 @@ fn setup_ui(
 
     commands.spawn(Camera2d);
 }
+
 
 pub fn viewer_app(args: BevyBurnDepthConfig) -> App {
     let mut app = App::new();

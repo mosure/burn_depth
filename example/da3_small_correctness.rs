@@ -9,7 +9,7 @@ use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
 use burn_depth::{
     inference::rgb_to_input_tensor,
     model::{
-        depth_anything3::{DepthAnything3, DepthAnything3Config, DepthTrace},
+        depth_anything3::{with_model_load_stack, DepthAnything3, DepthAnything3Config, DepthTrace},
         prepare_depth_anything3_image,
     },
 };
@@ -45,9 +45,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("Loading Depth Anything 3 small checkpoint...");
     let config = DepthAnything3Config::metric_small();
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model = DepthAnything3::<NdBackend>::new(&device, config)
-        .load_file("assets/model/da3_small.mpk", &recorder, &device)
-        .map_err(|err| format!("Failed to load DA3 small checkpoint: {err}"))?;
+    let model = with_model_load_stack(|| {
+        DepthAnything3::<NdBackend>::new(&device, config)
+            .load_file("assets/model/da3_small.mpk", &recorder, &device)
+    })
+    .map_err(|err| format!("Failed to load DA3 small checkpoint: {err}"))?;
 
     println!(
         "Checkpoint ready; loading reference tensors from {}...",

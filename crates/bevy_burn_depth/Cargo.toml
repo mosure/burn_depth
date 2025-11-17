@@ -75,7 +75,25 @@ features = [
   # "fusion",
   "std",
   # "template",
-  "wgpu",
+  # "wgpu",
+]
+
+[dependencies.burn-cubecl-fusion]
+version = "0.19"
+default-features = false
+features = [
+  "std",
+  # "std",
+]
+
+
+[dependencies.burn-wgpu]
+version = "0.19"
+default-features = false
+features = [
+  "fusion",
+  # "std",
+  # "template",
 ]
 
 
