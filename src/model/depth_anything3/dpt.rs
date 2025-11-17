@@ -57,7 +57,7 @@ impl DepthAnything3HeadConfig {
         }
     }
 
-    pub fn metric_small() -> Self {
+    pub fn small() -> Self {
         let aux_levels = 4;
         Self {
             dim_in: 768,

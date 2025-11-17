@@ -43,7 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let device = NdArrayDevice::default();
     println!("Loading Depth Anything 3 small checkpoint...");
-    let config = DepthAnything3Config::metric_small();
+    let config = DepthAnything3Config::small();
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
     let model = with_model_load_stack(|| {
         DepthAnything3::<NdBackend>::new(&device, config)

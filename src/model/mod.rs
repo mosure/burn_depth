@@ -66,7 +66,7 @@ impl<B: Backend> AnyDepthModel<B> {
 
         let mut configs = Vec::from([
             DepthAnything3Config::metric_large(),
-            DepthAnything3Config::metric_small(),
+            DepthAnything3Config::small(),
         ]);
 
         if checkpoint_hint.contains("small") {

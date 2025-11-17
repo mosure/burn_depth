@@ -224,7 +224,7 @@ impl ModelVariant {
     fn config(self) -> DepthAnything3Config {
         match self {
             ModelVariant::MetricLarge => DepthAnything3Config::metric_large(),
-            ModelVariant::Small => DepthAnything3Config::metric_small(),
+            ModelVariant::Small => DepthAnything3Config::small(),
         }
     }
 

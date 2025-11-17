@@ -10,7 +10,7 @@ type WgpuBackend = burn::backend::Wgpu<f32>;
 
 fn main() {
     let device = <WgpuBackend as Backend>::Device::default();
-    let config = DepthAnything3Config::metric_small();
+    let config = DepthAnything3Config::small();
     println!("constructing Depth Anything 3 (wgpu)...");
     println!("loading checkpoint...");
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();

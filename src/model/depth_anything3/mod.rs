@@ -73,12 +73,12 @@ impl DepthAnything3Config {
         Self::default()
     }
 
-    pub fn metric_small() -> Self {
+    pub fn small() -> Self {
         Self {
             image_size: 518,
             patch_size: 14,
             hook_block_ids: vec![5, 7, 9, 11],
-            head: DepthAnything3HeadConfig::metric_small(),
+            head: DepthAnything3HeadConfig::small(),
             camera_encoder: Some(CameraEncoderConfig {
                 dim_out: 384,
                 ..CameraEncoderConfig::default()
@@ -501,7 +501,7 @@ mod tests {
     fn depth_anything3_wgpu_record_roundtrip() {
         type TestBackend = burn::backend::Wgpu<f32>;
         let device = <TestBackend as Backend>::Device::default();
-        let config = DepthAnything3Config::metric_small();
+        let config = DepthAnything3Config::small();
         let model = DepthAnything3::<TestBackend>::new(&device, config);
         let record_item = model
             .clone()

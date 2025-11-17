@@ -49,6 +49,9 @@ pub struct BevyBurnDepthConfig {
 
     #[arg(long)]
     pub image_path: Option<PathBuf>,
+
+    #[arg(long, default_value = "true")]
+    pub normalize_relative_depth: bool,
 }
 
 impl Default for BevyBurnDepthConfig {
@@ -58,6 +61,7 @@ impl Default for BevyBurnDepthConfig {
             show_fps: true,
             checkpoint: PathBuf::from(DEFAULT_CHECKPOINT),
             image_path: None,
+            normalize_relative_depth: true,
         }
     }
 }
@@ -149,16 +153,18 @@ struct DepthModelState {
     preferred_resolution: Option<usize>,
     model: Option<Arc<Mutex<DepthAnything3<Wgpu>>>>,
     load_task: Option<Task<DepthModelLoadResult>>,
+    normalize_relative_depth: bool,
 }
 
 impl DepthModelState {
-    fn new(checkpoint: PathBuf, config: DepthAnything3Config) -> Self {
+    fn new(checkpoint: PathBuf, config: DepthAnything3Config, normalize_relative_depth: bool) -> Self {
         Self {
             checkpoint,
             preferred_resolution: Some(config.image_size),
             config,
             model: None,
             load_task: None,
+            normalize_relative_depth,
         }
     }
 }
@@ -221,6 +227,7 @@ fn process_frames(
         return;
     }
 
+    let normalize_relative_depth = depth_model.normalize_relative_depth;
     let device = burn_device.device().unwrap().clone();
     let model = model.clone();
 
@@ -247,6 +254,7 @@ fn process_frames(
                     device.clone(),
                     patch_size,
                     preferred_resolution,
+                    normalize_relative_depth,
                 )
                 .await;
                 let [tensor_height, tensor_width, _] = tensor.dims();
@@ -618,7 +626,7 @@ fn run_app(args: BevyBurnDepthConfig) {
     log("running app...");
     log(&format!("{args:?}"));
 
-    let config = DepthAnything3Config::metric_small();
+    let config = DepthAnything3Config::small();
 
     let static_frame = args.image_path.as_ref().map(|path| {
         image::open(path)
@@ -637,7 +645,11 @@ fn run_app(args: BevyBurnDepthConfig) {
 
     app.insert_resource(depth_texture);
     app.insert_resource(StaticFrame(static_frame.clone()));
-    app.insert_resource(DepthModelState::new(args.checkpoint.clone(), config));
+    app.insert_resource(DepthModelState::new(
+        args.checkpoint.clone(),
+        config,
+        args.normalize_relative_depth,
+    ));
     app.add_systems(
         Update,
         (

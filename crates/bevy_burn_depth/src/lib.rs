@@ -15,6 +15,7 @@ pub async fn process_frame<B: Backend>(
     device: B::Device,
     patch_size: usize,
     preferred_resolution: Option<usize>,
+    normalize_relative_depth: bool,
 ) -> Tensor<B, 3> {
     let patch_size = patch_size.max(1);
     let (frame, width, height) = prepare_input_frame(frame, patch_size, preferred_resolution);
@@ -30,28 +31,36 @@ pub async fn process_frame<B: Backend>(
     let height = dims[0];
     let width = dims[1];
 
-    let min_depth = depth_map
-        .clone()
-        .min()
-        .into_scalar_async()
-        .await
-        .elem::<f32>();
-    let max_depth = depth_map
-        .clone()
-        .max()
-        .into_scalar_async()
-        .await
-        .elem::<f32>();
-    let range = (max_depth - min_depth).max(f32::EPSILON);
+    let display_tensor = if normalize_relative_depth {
+        let min_depth = depth_map
+            .clone()
+            .min()
+            .into_scalar_async()
+            .await
+            .elem::<f32>();
+        let max_depth = depth_map
+            .clone()
+            .max()
+            .into_scalar_async()
+            .await
+            .elem::<f32>();
+        let range = (max_depth - min_depth).max(f32::EPSILON);
 
-    let normalized = depth_map
-        .sub_scalar(min_depth)
-        .div_scalar(range)
-        .clamp(0.0, 1.0)
-        .reshape([height as i32, width as i32, 1]);
+        depth_map
+            .sub_scalar(min_depth)
+            .div_scalar(range)
+            .clamp(0.0, 1.0)
+            .reshape([height as i32, width as i32, 1])
+    } else {
+        depth_map.clone().reshape([height as i32, width as i32, 1])
+    };
 
     let rgb = Tensor::<B, 3>::cat(
-        vec![normalized.clone(), normalized.clone(), normalized.clone()],
+        vec![
+            display_tensor.clone(),
+            display_tensor.clone(),
+            display_tensor.clone(),
+        ],
         2,
     );
 
