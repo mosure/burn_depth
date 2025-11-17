@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 
 use burn::prelude::*;
-use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+use burn::record::{HalfPrecisionSettings, NamedMpkFileRecorder};
 use burn_depth::model::depth_anything3::{
     with_model_load_stack, DepthAnything3, DepthAnything3Config,
 };
@@ -13,7 +13,7 @@ fn main() {
     let config = DepthAnything3Config::small();
     println!("constructing Depth Anything 3 (wgpu)...");
     println!("loading checkpoint...");
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
     let checkpoint = "assets/model/da3_small.mpk";
     with_model_load_stack(|| {
         DepthAnything3::<WgpuBackend>::new(&device, config)

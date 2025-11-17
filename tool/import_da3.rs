@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use burn::{
     backend::NdArray,
     module::Module,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder},
     tensor::backend::Backend,
 };
 use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
     model
         .save_file(output.clone(), &recorder)
         .map_err(|err| format!("Failed to save checkpoint: {err}"))?;

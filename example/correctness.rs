@@ -10,7 +10,7 @@ use std::{
 use burn::{
     nn::interpolate::{Interpolate2dConfig, InterpolateMode},
     prelude::*,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder},
 };
 use burn_depth::{
     InferenceBackend,
@@ -974,7 +974,7 @@ fn compute_da3_outputs(
         .into());
     }
 
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
     let model = with_model_load_stack(|| {
         DepthAnything3::<InferenceBackend>::new(&device, DepthAnything3Config::metric_large())
             .load_file(checkpoint_path, &recorder, &device)

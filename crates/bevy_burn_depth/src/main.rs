@@ -72,7 +72,7 @@ mod io {
 
     use burn::{
         prelude::*,
-        record::{FullPrecisionSettings, NamedMpkFileRecorder},
+        record::{HalfPrecisionSettings, NamedMpkFileRecorder},
     };
     use burn_depth::model::depth_anything3::{
         with_model_load_stack, DepthAnything3, DepthAnything3Config,
@@ -83,7 +83,7 @@ mod io {
         checkpoint: &Path,
         device: &B::Device,
     ) -> DepthAnything3<B> {
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
         with_model_load_stack(|| {
             DepthAnything3::new(device, config).load_file(checkpoint, &recorder, device)
         })
@@ -95,7 +95,7 @@ mod io {
 mod io {
     use burn::{
         prelude::*,
-        record::{FullPrecisionSettings, NamedMpkBytesRecorder},
+        record::{HalfPrecisionSettings, NamedMpkBytesRecorder},
     };
     use burn_depth::model::depth_anything3::{
         with_model_load_stack, DepthAnything3, DepthAnything3Config,
@@ -135,7 +135,7 @@ mod io {
         let mut data = vec![0; bytes.length() as usize];
         bytes.copy_to(&mut data);
 
-        let record = NamedMpkBytesRecorder::<FullPrecisionSettings>::default()
+        let record = NamedMpkBytesRecorder::<HalfPrecisionSettings>::default()
             .load(data, device)
             .expect("failed to decode checkpoint");
 

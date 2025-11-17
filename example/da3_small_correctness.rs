@@ -5,7 +5,7 @@ use std::{
 
 use burn::backend::ndarray::{NdArray, NdArrayDevice};
 use burn::prelude::*;
-use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+use burn::record::{HalfPrecisionSettings, NamedMpkFileRecorder};
 use burn_depth::{
     inference::rgb_to_input_tensor,
     model::{
@@ -44,7 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let device = NdArrayDevice::default();
     println!("Loading Depth Anything 3 small checkpoint...");
     let config = DepthAnything3Config::small();
-    let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
     let model = with_model_load_stack(|| {
         DepthAnything3::<NdBackend>::new(&device, config)
             .load_file("assets/model/da3_small.mpk", &recorder, &device)

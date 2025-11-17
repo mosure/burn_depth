@@ -484,7 +484,7 @@ mod tests {
     use super::*;
     use crate::InferenceBackend;
     #[cfg(feature = "backend_wgpu")]
-    use burn::record::{FullPrecisionSettings, Record};
+    use burn::record::{HalfPrecisionSettings, Record};
 
     #[test]
     fn depth_anything3_emits_depth_tensor() {
@@ -506,7 +506,7 @@ mod tests {
         let record_item = model
             .clone()
             .into_record()
-            .into_item::<FullPrecisionSettings>();
+            .into_item::<HalfPrecisionSettings>();
         let _ = <DepthAnything3<TestBackend> as Module<TestBackend>>::Record::from_item(
             record_item,
             &device,

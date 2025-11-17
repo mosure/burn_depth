@@ -4,7 +4,7 @@ pub mod depth_pro;
 use burn::{
     module::Module,
     prelude::*,
-    record::{FullPrecisionSettings, NamedMpkFileRecorder},
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder},
 };
 use image::{
     RgbImage,
@@ -57,7 +57,7 @@ impl<B: Backend> AnyDepthModel<B> {
     }
 
     fn load_depth_anything3(device: &B::Device, checkpoint: &Path) -> Result<Self, String> {
-        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
         let checkpoint_hint = checkpoint
             .file_name()
             .and_then(|name| name.to_str())
