@@ -240,50 +240,53 @@ fn extri_intri_to_pose_encoding<B: Backend>(
     target_dim: usize,
 ) -> Tensor<B, 3> {
     let device = extrinsics.device();
-    let extr_data = extrinsics.into_data().convert::<f32>();
-    let intr_data = intrinsics.into_data().convert::<f32>();
-    let extr_values = extr_data
-        .to_vec::<f32>()
-        .expect("extrinsics tensor conversion");
-    let intr_values = intr_data
-        .to_vec::<f32>()
-        .expect("intrinsics tensor conversion");
-    let shape = extr_data.shape.clone();
-    let batch = shape[0];
-    let views = shape[1];
-    let rows = shape[2];
-    let cols = shape[3];
-    let mut pose = Vec::with_capacity(batch * views * target_dim);
-    for b in 0..batch {
-        for v in 0..views {
-            let base = ((b * views + v) * rows * cols) as usize;
-            let matrix = &extr_values[base..base + rows * cols];
-            let mut w2c = [0.0f32; 16];
-            copy_3x4_into_homogeneous(matrix, rows, cols, &mut w2c);
-            let c2w = affine_inverse_host(&w2c);
-            let translation = [c2w[3], c2w[7], c2w[11]];
-            let rotation = [
-                c2w[0], c2w[1], c2w[2], c2w[4], c2w[5], c2w[6], c2w[8], c2w[9], c2w[10],
-            ];
-            let quat = mat_to_quat_host(&rotation);
+    let dims = extrinsics.shape().dims::<4>();
+    let batch = dims[0];
+    let views = dims[1];
+    let total = (batch * views) as i32;
 
-            let intr_base = ((b * views + v) * 9) as usize;
-            let fx = intr_values[intr_base];
-            let fy = intr_values[intr_base + 4];
-            let fov_h = 2.0 * ((image_height as f32 / 2.0) / fy).atan();
-            let fov_w = 2.0 * ((image_width as f32 / 2.0) / fx).atan();
+    let w2c = extrinsics.reshape([total, 3, 4]);
+    let rotation = w2c.clone().slice([0..total, 0..3, 0..3]);
+    let translation = w2c
+        .slice([0..total, 0..3, 3..4])
+        .reshape([total, 3, 1]);
 
-            pose.extend_from_slice(&translation);
-            pose.extend_from_slice(&quat);
-            pose.push(fov_h);
-            pose.push(fov_w);
-        }
-    }
-    Tensor::<B, 1>::from_floats(pose.as_slice(), &device).reshape([
-        batch as i32,
-        views as i32,
-        target_dim as i32,
-    ])
+    let c2w_rotation = rotation.clone().permute([0, 2, 1]);
+    let c2w_translation = -c2w_rotation
+        .clone()
+        .matmul(translation)
+        .squeeze_dim::<2>(2);
+    let quaternion = matrix_to_quaternion(c2w_rotation.clone(), &device);
+
+    let intr = intrinsics.reshape([total, 3, 3]);
+    let fx = intr
+        .clone()
+        .slice([0..total, 0..1, 0..1])
+        .reshape([total]);
+    let fy = intr
+        .slice([0..total, 1..2, 1..2])
+        .reshape([total]);
+
+    let width_half = scalar_tensor(total, image_width as f32 / 2.0, &device);
+    let height_half = scalar_tensor(total, image_height as f32 / 2.0, &device);
+    let fov_w = approx_atan_positive(width_half.clone() / fx, &device) * 2.0;
+    let fov_h = approx_atan_positive(height_half.clone() / fy, &device) * 2.0;
+
+    let translation_flat = c2w_translation.clone();
+    let fov_tensor = Tensor::cat(
+        vec![
+            fov_h.clone().reshape([total, 1]),
+            fov_w.clone().reshape([total, 1]),
+        ],
+        1,
+    );
+    let pose = Tensor::cat(
+        vec![translation_flat, quaternion.clone(), fov_tensor],
+        1,
+    )
+    .reshape([batch as i32, views as i32, target_dim as i32]);
+
+    pose
 }
 
 fn pose_encoding_to_extri_intri<B: Backend>(
@@ -292,170 +295,236 @@ fn pose_encoding_to_extri_intri<B: Backend>(
     image_width: usize,
 ) -> (Tensor<B, 4>, Tensor<B, 4>) {
     let device = pose.device();
-    let data = pose.into_data().convert::<f32>();
-    let values = data.to_vec::<f32>().expect("pose tensor to vec");
-    let shape = data.shape.clone();
-    let batch = shape[0];
-    let views = shape[1];
-    let mut extrinsics = Vec::with_capacity(batch * views * 12);
-    let mut intrinsics = Vec::with_capacity(batch * views * 9);
-    for b in 0..batch {
-        for v in 0..views {
-            let base = ((b * views + v) * 9) as usize;
-            let translation = [values[base], values[base + 1], values[base + 2]];
-            let quat = [
-                values[base + 3],
-                values[base + 4],
-                values[base + 5],
-                values[base + 6],
-            ];
-            let fov_h = values[base + 7];
-            let fov_w = values[base + 8];
-            let rotation = quat_to_mat_host(quat);
+    let dims = pose.shape().dims::<3>();
+    let batch = dims[0];
+    let views = dims[1];
+    let total = (batch * views) as i32;
+    let flat = pose.clone().reshape([total, 9]);
 
-            let mut c2w = [0.0f32; 12];
-            c2w[0] = rotation[0];
-            c2w[1] = rotation[1];
-            c2w[2] = rotation[2];
-            c2w[3] = translation[0];
-            c2w[4] = rotation[3];
-            c2w[5] = rotation[4];
-            c2w[6] = rotation[5];
-            c2w[7] = translation[1];
-            c2w[8] = rotation[6];
-            c2w[9] = rotation[7];
-            c2w[10] = rotation[8];
-            c2w[11] = translation[2];
-            let w2c = invert_c2w_to_w2c(&c2w);
-            extrinsics.extend_from_slice(&w2c);
+    let translation = flat.clone().slice([0..total, 0..3]).reshape([total, 3, 1]);
+    let quaternion = flat.clone().slice([0..total, 3..7]);
+    let fov = flat.slice([0..total, 7..9]);
 
-            let fy = (image_height as f32 / 2.0) / (0.5 * fov_h).tan();
-            let fx = (image_width as f32 / 2.0) / (0.5 * fov_w).tan();
-            intrinsics.extend_from_slice(&[
-                fx,
-                0.0,
-                image_width as f32 / 2.0,
-                0.0,
-                fy,
-                image_height as f32 / 2.0,
-                0.0,
-                0.0,
-                1.0,
-            ]);
-        }
-    }
+    let rotation = quaternion_to_matrix(quaternion, &device);
+    let rotation_t = rotation.clone().permute([0, 2, 1]);
+    let translation_w2c = (-rotation_t.clone().matmul(translation).squeeze_dim::<2>(2))
+        .unsqueeze_dim::<3>(2);
+    let extrinsics = Tensor::cat(vec![rotation_t, translation_w2c], 2)
+        .reshape([batch as i32, views as i32, 3, 4]);
 
-    let extr_tensor = Tensor::<B, 1>::from_floats(extrinsics.as_slice(), &device).reshape([
-        batch as i32,
-        views as i32,
-        3,
-        4,
-    ]);
+    let fov_h = fov.clone().slice([0..total, 0..1]).reshape([total]);
+    let fov_w = fov.slice([0..total, 1..2]).reshape([total]);
+    let half = scalar_tensor(total, 0.5, &device);
+    let tan_half_h = (fov_h.clone() * half.clone()).sin() / (fov_h.clone() * half.clone()).cos();
+    let tan_half_w = (fov_w.clone() * half.clone()).sin() / (fov_w.clone() * half.clone()).cos();
+    let height_half = scalar_tensor(total, image_height as f32 / 2.0, &device);
+    let width_half = scalar_tensor(total, image_width as f32 / 2.0, &device);
+    let fy = height_half.clone() / tan_half_h;
+    let fx = width_half.clone() / tan_half_w;
+    let zeros = scalar_tensor(total, 0.0, &device);
+    let ones = scalar_tensor(total, 1.0, &device);
 
-    let intr_tensor = Tensor::<B, 1>::from_floats(intrinsics.as_slice(), &device).reshape([
-        batch as i32,
-        views as i32,
-        3,
-        3,
-    ]);
+    let row0 = Tensor::cat(
+        vec![
+            fx.clone().reshape([total, 1]),
+            zeros.clone().reshape([total, 1]),
+            width_half.clone().reshape([total, 1]),
+        ],
+        1,
+    );
+    let row1 = Tensor::cat(
+        vec![
+            zeros.clone().reshape([total, 1]),
+            fy.clone().reshape([total, 1]),
+            height_half.clone().reshape([total, 1]),
+        ],
+        1,
+    );
+    let row2 = Tensor::cat(
+        vec![
+            zeros.clone().reshape([total, 1]),
+            zeros.clone().reshape([total, 1]),
+            ones.clone().reshape([total, 1]),
+        ],
+        1,
+    );
 
-    (extr_tensor, intr_tensor)
+    let intrinsics = Tensor::cat(
+        vec![
+            row0.clone().unsqueeze_dim::<3>(1),
+            row1.clone().unsqueeze_dim::<3>(1),
+            row2.clone().unsqueeze_dim::<3>(1),
+        ],
+        1,
+    )
+        .reshape([batch as i32, views as i32, 3, 3]);
+
+    (extrinsics, intrinsics)
 }
 
-fn affine_inverse_host(matrix: &[f32]) -> [f32; 16] {
-    let r = [
-        matrix[0], matrix[1], matrix[2], matrix[4], matrix[5], matrix[6], matrix[8], matrix[9],
-        matrix[10],
-    ];
-    let t = [matrix[3], matrix[7], matrix[11]];
-    let rt = [r[0], r[3], r[6], r[1], r[4], r[7], r[2], r[5], r[8]];
-    let tx = -rt[0] * t[0] - rt[1] * t[1] - rt[2] * t[2];
-    let ty = -rt[3] * t[0] - rt[4] * t[1] - rt[5] * t[2];
-    let tz = -rt[6] * t[0] - rt[7] * t[1] - rt[8] * t[2];
-    [
-        rt[0], rt[1], rt[2], tx, rt[3], rt[4], rt[5], ty, rt[6], rt[7], rt[8], tz, 0.0, 0.0, 0.0,
-        1.0,
-    ]
+fn scalar_tensor<B: Backend>(len: i32, value: f32, device: &B::Device) -> Tensor<B, 1> {
+    Tensor::<B, 1>::ones([len], device) * value
 }
 
-fn mat_to_quat_host(matrix: &[f32]) -> [f32; 4] {
-    let trace = matrix[0] + matrix[4] + matrix[8];
-    if trace > 0.0 {
-        let s = (trace + 1.0).sqrt() * 2.0;
-        [
-            (matrix[7] - matrix[5]) / s,
-            (matrix[2] - matrix[6]) / s,
-            (matrix[3] - matrix[1]) / s,
-            0.25 * s,
-        ]
-    } else if matrix[0] > matrix[4] && matrix[0] > matrix[8] {
-        let s = (1.0 + matrix[0] - matrix[4] - matrix[8]).sqrt() * 2.0;
-        [
-            0.25 * s,
-            (matrix[1] + matrix[3]) / s,
-            (matrix[2] + matrix[6]) / s,
-            (matrix[7] - matrix[5]) / s,
-        ]
-    } else if matrix[4] > matrix[8] {
-        let s = (1.0 + matrix[4] - matrix[0] - matrix[8]).sqrt() * 2.0;
-        [
-            (matrix[1] + matrix[3]) / s,
-            0.25 * s,
-            (matrix[5] + matrix[7]) / s,
-            (matrix[2] - matrix[6]) / s,
-        ]
-    } else {
-        let s = (1.0 + matrix[8] - matrix[0] - matrix[4]).sqrt() * 2.0;
-        [
-            (matrix[2] + matrix[6]) / s,
-            (matrix[5] + matrix[7]) / s,
-            0.25 * s,
-            (matrix[3] - matrix[1]) / s,
-        ]
-    }
+fn quaternion_to_matrix<B: Backend>(
+    quat: Tensor<B, 2>,
+    device: &B::Device,
+) -> Tensor<B, 3> {
+    let total = quat.shape().dims::<2>()[0] as i32;
+    let x = quat.clone().slice([0..total, 0..1]).reshape([total]);
+    let y = quat.clone().slice([0..total, 1..2]).reshape([total]);
+    let z = quat.clone().slice([0..total, 2..3]).reshape([total]);
+    let w = quat.slice([0..total, 3..4]).reshape([total]);
+
+    let xx = x.clone() * x.clone();
+    let yy = y.clone() * y.clone();
+    let zz = z.clone() * z.clone();
+    let xy = x.clone() * y.clone();
+    let xz = x.clone() * z.clone();
+    let yz = y.clone() * z.clone();
+    let wx = w.clone() * x.clone();
+    let wy = w.clone() * y.clone();
+    let wz = w.clone() * z.clone();
+
+    let ones = scalar_tensor(total, 1.0, device);
+    let two = ones.clone() * 2.0;
+
+    let row0 = Tensor::cat(
+        vec![
+            (ones.clone() - two.clone() * (yy.clone() + zz.clone())).reshape([total, 1]),
+            (two.clone() * (xy.clone() - wz.clone())).reshape([total, 1]),
+            (two.clone() * (xz.clone() + wy.clone())).reshape([total, 1]),
+        ],
+        1,
+    );
+    let row1 = Tensor::cat(
+        vec![
+            (two.clone() * (xy.clone() + wz.clone())).reshape([total, 1]),
+            (ones.clone() - two.clone() * (xx.clone() + zz.clone())).reshape([total, 1]),
+            (two.clone() * (yz.clone() - wx.clone())).reshape([total, 1]),
+        ],
+        1,
+    );
+    let row2 = Tensor::cat(
+        vec![
+            (two.clone() * (xz.clone() - wy.clone())).reshape([total, 1]),
+            (two.clone() * (yz.clone() + wx.clone())).reshape([total, 1]),
+            (ones.clone() - two.clone() * (xx.clone() + yy.clone())).reshape([total, 1]),
+        ],
+        1,
+    );
+
+    Tensor::cat(
+        vec![
+            row0.clone().unsqueeze_dim::<3>(1),
+            row1.clone().unsqueeze_dim::<3>(1),
+            row2.clone().unsqueeze_dim::<3>(1),
+        ],
+        1,
+    )
+    .reshape([total, 3, 3])
 }
 
-fn quat_to_mat_host(quat: [f32; 4]) -> [f32; 9] {
-    let [x, y, z, w] = quat;
-    let xx = x * x;
-    let yy = y * y;
-    let zz = z * z;
-    let xy = x * y;
-    let xz = x * z;
-    let yz = y * z;
-    let wx = w * x;
-    let wy = w * y;
-    let wz = w * z;
-    [
-        1.0 - 2.0 * (yy + zz),
-        2.0 * (xy + wz),
-        2.0 * (xz - wy),
-        2.0 * (xy - wz),
-        1.0 - 2.0 * (xx + zz),
-        2.0 * (yz + wx),
-        2.0 * (xz + wy),
-        2.0 * (yz - wx),
-        1.0 - 2.0 * (xx + yy),
-    ]
+fn matrix_to_quaternion<B: Backend>(
+    rotation: Tensor<B, 3>,
+    device: &B::Device,
+) -> Tensor<B, 2> {
+    let total = rotation.shape().dims::<3>()[0] as i32;
+    let m00 = rotation.clone().slice([0..total, 0..1, 0..1]).reshape([total]);
+    let m01 = rotation.clone().slice([0..total, 0..1, 1..2]).reshape([total]);
+    let m02 = rotation.clone().slice([0..total, 0..1, 2..3]).reshape([total]);
+    let m10 = rotation.clone().slice([0..total, 1..2, 0..1]).reshape([total]);
+    let m11 = rotation.clone().slice([0..total, 1..2, 1..2]).reshape([total]);
+    let m12 = rotation.clone().slice([0..total, 1..2, 2..3]).reshape([total]);
+    let m20 = rotation.clone().slice([0..total, 2..3, 0..1]).reshape([total]);
+    let m21 = rotation.clone().slice([0..total, 2..3, 1..2]).reshape([total]);
+    let m22 = rotation.slice([0..total, 2..3, 2..3]).reshape([total]);
+
+    let ones = scalar_tensor(total, 1.0, device);
+    let quarter = ones.clone() * 0.25;
+    let eps = scalar_tensor(total, 1e-6, device);
+
+    let trace = m00.clone() + m11.clone() + m22.clone();
+    let s_trace = ((trace.clone() + ones.clone()).clamp_min(1e-6).sqrt() * 2.0).reshape([total]);
+    let qw_trace = (quarter.clone() * s_trace.clone()).reshape([total, 1]);
+    let qx_trace = ((m21.clone() - m12.clone()) / s_trace.clone()).reshape([total, 1]);
+    let qy_trace = ((m02.clone() - m20.clone()) / s_trace.clone()).reshape([total, 1]);
+    let qz_trace = ((m10.clone() - m01.clone()) / s_trace.clone()).reshape([total, 1]);
+    let quat_trace = Tensor::stack(
+        vec![
+            qx_trace,
+            qy_trace,
+            qz_trace,
+            qw_trace,
+        ],
+        1,
+    );
+
+    let s_x = ((ones.clone() + m00.clone() - m11.clone() - m22.clone()).clamp_min(1e-6).sqrt()
+        * 2.0)
+        .reshape([total]);
+    let qx_x = (quarter.clone() * s_x.clone()).reshape([total, 1]);
+    let qw_x = ((m21.clone() - m12.clone()) / (s_x.clone() + eps.clone())).reshape([total, 1]);
+    let qy_x = ((m01.clone() + m10.clone()) / (s_x.clone() + eps.clone())).reshape([total, 1]);
+    let qz_x = ((m02.clone() + m20.clone()) / (s_x.clone() + eps.clone())).reshape([total, 1]);
+    let quat_x = Tensor::stack(vec![qx_x, qy_x, qz_x, qw_x], 1);
+
+    let s_y = ((ones.clone() + m11.clone() - m00.clone() - m22.clone()).clamp_min(1e-6).sqrt()
+        * 2.0)
+        .reshape([total]);
+    let qy_y = (quarter.clone() * s_y.clone()).reshape([total, 1]);
+    let qw_y = ((m02.clone() - m20.clone()) / (s_y.clone() + eps.clone())).reshape([total, 1]);
+    let qx_y = ((m01.clone() + m10.clone()) / (s_y.clone() + eps.clone())).reshape([total, 1]);
+    let qz_y = ((m12.clone() + m21.clone()) / (s_y.clone() + eps.clone())).reshape([total, 1]);
+    let quat_y = Tensor::stack(vec![qx_y, qy_y, qz_y, qw_y], 1);
+
+    let s_z = ((ones.clone() + m22.clone() - m00.clone() - m11.clone()).clamp_min(1e-6).sqrt()
+        * 2.0)
+        .reshape([total]);
+    let qz_z = (quarter.clone() * s_z.clone()).reshape([total, 1]);
+    let qw_z = ((m10 - m01) / (s_z.clone() + eps.clone())).reshape([total, 1]);
+    let qx_z = ((m02.clone() + m20.clone()) / (s_z.clone() + eps.clone())).reshape([total, 1]);
+    let qy_z = ((m12.clone() + m21.clone()) / (s_z.clone() + eps.clone())).reshape([total, 1]);
+    let quat_z = Tensor::stack(vec![qx_z, qy_z, qz_z, qw_z], 1);
+
+    let mask_trace = trace.clone().greater_elem(0.0).float();
+    let cond_x = m00.clone().greater(m11.clone()).float()
+        * m00.clone().greater(m22.clone()).float();
+    let mask_x = (ones.clone() - mask_trace.clone()) * cond_x;
+    let cond_y = m11.clone().greater(m22.clone()).float();
+    let mask_y = (ones.clone() - mask_trace.clone() - mask_x.clone()) * cond_y;
+    let mask_z = ones.clone() - mask_trace.clone() - mask_x.clone() - mask_y.clone();
+
+    let mask_trace = mask_trace.reshape([total, 1]);
+    let mask_x = mask_x.reshape([total, 1]);
+    let mask_y = mask_y.reshape([total, 1]);
+    let mask_z = mask_z.reshape([total, 1]);
+
+    quat_trace * mask_trace + quat_x * mask_x + quat_y * mask_y + quat_z * mask_z
 }
 
-fn copy_3x4_into_homogeneous(src: &[f32], rows: usize, cols: usize, dst: &mut [f32; 16]) {
-    dst.fill(0.0);
-    for r in 0..rows.min(3) {
-        for c in 0..4 {
-            let value = if c < cols { src[r * cols + c] } else { 0.0 };
-            dst[r * 4 + c] = value;
-        }
-    }
-    dst[15] = 1.0;
-}
+fn approx_atan_positive<B: Backend>(
+    x: Tensor<B, 1>,
+    device: &B::Device,
+) -> Tensor<B, 1> {
+    let dims = x.shape().dims::<1>()[0] as i32;
+    let ones = scalar_tensor(dims, 1.0, device);
+    let abs_x = x.clone();
+    let coeff_a = scalar_tensor(dims, 0.2447, device);
+    let coeff_b = scalar_tensor(dims, 0.0663, device);
+    let pi_over_4 = scalar_tensor(dims, core::f32::consts::FRAC_PI_4, device);
+    let pi_over_2 = scalar_tensor(dims, core::f32::consts::FRAC_PI_2, device);
 
-fn invert_c2w_to_w2c(matrix: &[f32; 12]) -> [f32; 12] {
-    let mut homo = [0.0f32; 16];
-    copy_3x4_into_homogeneous(matrix, 3, 4, &mut homo);
-    let inv = affine_inverse_host(&homo);
-    [
-        inv[0], inv[1], inv[2], inv[3], inv[4], inv[5], inv[6], inv[7], inv[8], inv[9], inv[10],
-        inv[11],
-    ]
+    let approximation = |v: Tensor<B, 1>| {
+        let term = coeff_a.clone() + coeff_b.clone() * v.clone();
+        (pi_over_4.clone() * v.clone()) - v.clone() * (v.clone() - ones.clone()) * term
+    };
+
+    let small = approximation(abs_x.clone());
+    let inv = ones.clone() / abs_x.clone().clamp_min(1e-6);
+    let large = pi_over_2.clone() - approximation(inv);
+
+    let mask_small = abs_x.clone().lower_equal_elem(1.0).float();
+    let mask_large = ones.clone() - mask_small.clone();
+    small * mask_small + large * mask_large
 }

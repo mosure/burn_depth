@@ -26,10 +26,17 @@ fn inference_benchmark(c: &mut Criterion) {
     let pro_size = depth_pro.img_size();
     let pro_input = Tensor::<InferenceBackend, 4>::zeros([1, 3, pro_size, pro_size], &device);
 
-    let depth_anything =
+    let depth_anything_large =
         DepthAnything3::<InferenceBackend>::new(&device, DepthAnything3Config::metric_large());
-    let da3_size = depth_anything.img_size();
-    let da3_input = Tensor::<InferenceBackend, 4>::zeros([1, 3, da3_size, da3_size], &device);
+    let da3_large_size = depth_anything_large.img_size();
+    let da3_large_input =
+        Tensor::<InferenceBackend, 4>::zeros([1, 3, da3_large_size, da3_large_size], &device);
+
+    let depth_anything_small =
+        DepthAnything3::<InferenceBackend>::new(&device, DepthAnything3Config::metric_small());
+    let da3_small_size = depth_anything_small.img_size();
+    let da3_small_input =
+        Tensor::<InferenceBackend, 4>::zeros([1, 3, da3_small_size, da3_small_size], &device);
 
     let mut group = c.benchmark_group("burn_depth_inference");
     group.throughput(Throughput::Elements(1));
@@ -40,9 +47,16 @@ fn inference_benchmark(c: &mut Criterion) {
             black_box(output);
         });
     });
-    group.bench_function("depth_anything3_infer", |b| {
+    group.bench_function("depth_anything3_metric_large_infer", |b| {
         b.iter(|| {
-            let output = depth_anything.infer(da3_input.clone());
+            let output = depth_anything_large.infer(da3_large_input.clone());
+            InferenceBackend::sync(&bench_device);
+            black_box(output);
+        });
+    });
+    group.bench_function("depth_anything3_metric_small_infer", |b| {
+        b.iter(|| {
+            let output = depth_anything_small.infer(da3_small_input.clone());
             InferenceBackend::sync(&bench_device);
             black_box(output);
         });
