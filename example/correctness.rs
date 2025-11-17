@@ -1,10 +1,5 @@
 #![recursion_limit = "256"]
 
-#[path = "common.rs"]
-mod common;
-
-use common::resize_with_bicubic;
-
 use std::{
     convert::TryInto,
     f32::consts::PI,
@@ -23,6 +18,7 @@ use burn_depth::{
     model::{
         depth_anything3::{DepthAnything3, DepthAnything3Config},
         depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
+        prepare_depth_anything3_image,
     },
 };
 use clap::{Parser, ValueEnum};
@@ -988,15 +984,9 @@ fn compute_da3_outputs(
     let base_rgb = image::open(image_path)
         .map_err(|err| format!("Failed to open image `{}`: {err}", image_path.display()))?
         .to_rgb8();
-    let target_u32 = u32::try_from(target)
-        .map_err(|_| format!("Resize target {target} exceeds valid u32 range"))?;
-    let resized = resize_with_bicubic(&base_rgb, target_u32, target_u32).map_err(|err| {
-        format!(
-            "Failed to resize image `{}` to {}: {err}",
-            image_path.display(),
-            target
-        )
-    })?;
+    let prepared = prepare_depth_anything3_image(base_rgb, target)
+        .map_err(|err| format!("Failed to prepare DA3 input: {err}"))?;
+    let resized = prepared.rgb;
     if std::env::var("DA3_DUMP_RESIZED").is_ok() {
         let dump_path = Path::new("target/da3_resized_burn.rgb");
         if let Some(parent) = dump_path.parent() {

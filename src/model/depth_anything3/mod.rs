@@ -2,12 +2,20 @@ use burn::{
     module::{Ignored, Module},
     prelude::*,
 };
-use burn_dino::model::dino::{DinoVisionTransformer, DinoVisionTransformerConfig};
+use burn_dino::model::dino::{
+    DinoIntermediate, DinoVisionTransformer, DinoVisionTransformerConfig,
+};
 
+use camera::{CameraDecoder, CameraEncoder, CameraPrediction};
+mod camera;
 mod dpt;
 mod interpolate;
 
-pub use dpt::{DepthAnything3Head, DepthAnything3HeadConfig, HeadActivation};
+pub use camera::{CameraDecoderConfig, CameraEncoderConfig};
+pub use dpt::{
+    DepthAnything3Head, DepthAnything3HeadConfig, DualDepthAnything3Head, DualHeadOutput,
+    HeadActivation,
+};
 
 #[derive(Config, Debug)]
 pub struct DepthAnything3Config {
@@ -15,6 +23,10 @@ pub struct DepthAnything3Config {
     pub patch_size: usize,
     pub hook_block_ids: Vec<usize>,
     pub head: DepthAnything3HeadConfig,
+    #[config(default = "None")]
+    pub camera_encoder: Option<CameraEncoderConfig>,
+    #[config(default = "None")]
+    pub camera_decoder: Option<CameraDecoderConfig>,
 
     #[config(default = "None")]
     pub checkpoint_uri: Option<String>,
@@ -27,6 +39,8 @@ impl Default for DepthAnything3Config {
             patch_size: 14,
             hook_block_ids: vec![4, 11, 17, 23],
             head: DepthAnything3HeadConfig::metric_large(),
+            camera_encoder: None,
+            camera_decoder: None,
             checkpoint_uri: Some("assets/model/da3_metric_large.mpk".to_string()),
         }
     }
@@ -36,6 +50,21 @@ impl DepthAnything3Config {
     pub fn metric_large() -> Self {
         Self::default()
     }
+
+    pub fn metric_small() -> Self {
+        Self {
+            image_size: 518,
+            patch_size: 14,
+            hook_block_ids: vec![5, 7, 9, 11],
+            head: DepthAnything3HeadConfig::metric_small(),
+            camera_encoder: Some(CameraEncoderConfig {
+                dim_out: 384,
+                ..CameraEncoderConfig::default()
+            }),
+            camera_decoder: Some(CameraDecoderConfig { dim_in: 768 }),
+            checkpoint_uri: Some("assets/model/da3_small.mpk".to_string()),
+        }
+    }
 }
 
 #[derive(Module, Debug)]
@@ -44,13 +73,25 @@ struct Backbone<B: Backend> {
 }
 
 impl<B: Backend> Backbone<B> {
-    fn new(device: &B::Device, image_size: usize, patch_size: usize) -> Self {
-        let mut config = DinoVisionTransformerConfig::vitl(Some(image_size), Some(patch_size));
-        config.register_token_count = 0;
-        config.use_register_tokens = false;
-        config.block_config.attn.quiet_softmax = false;
+    fn new(device: &B::Device, config: &DepthAnything3Config) -> Self {
+        let mut vit_config = if config.head.dim_in >= 1024 {
+            DinoVisionTransformerConfig::vitl(Some(config.image_size), Some(config.patch_size))
+        } else {
+            DinoVisionTransformerConfig::vits(Some(config.image_size), Some(config.patch_size))
+        };
+        vit_config.register_token_count = 0;
+        vit_config.use_register_tokens = false;
+        vit_config.use_mask_token = false;
+        vit_config.block_config.attn.quiet_softmax = false;
+        if config.head.dual_head {
+            vit_config.alt_block_start = Some(4);
+            vit_config.qk_norm_block_start = Some(4);
+            vit_config.rope_block_start = Some(4);
+            vit_config.cat_token = true;
+            vit_config.use_camera_tokens = true;
+        }
         Self {
-            pretrained: config.init(device),
+            pretrained: vit_config.init(device),
         }
     }
 
@@ -58,10 +99,14 @@ impl<B: Backend> Backbone<B> {
         &self,
         input: Tensor<B, 4>,
         hook_blocks: &[usize],
-    ) -> (Tensor<B, 3>, Vec<Tensor<B, 3>>) {
-        let (output, hooks) = self
-            .pretrained
-            .forward_with_intermediate_tokens(input, hook_blocks);
+        camera_token: Option<Tensor<B, 2>>,
+    ) -> (Tensor<B, 3>, Vec<DinoIntermediate<B>>) {
+        let (output, hooks, _) = self.pretrained.forward_with_intermediate_tokens_ext(
+            input,
+            hook_blocks,
+            &[],
+            camera_token,
+        );
         (output.x_norm_patchtokens, hooks)
     }
 }
@@ -69,7 +114,10 @@ impl<B: Backend> Backbone<B> {
 #[derive(Module, Debug)]
 pub struct DepthAnything3<B: Backend> {
     backbone: Backbone<B>,
-    head: DepthAnything3Head<B>,
+    head_mono: Option<DepthAnything3Head<B>>,
+    head_dual: Option<DualDepthAnything3Head<B>>,
+    camera_encoder: Option<CameraEncoder<B>>,
+    camera_decoder: Option<CameraDecoder<B>>,
     img_size: Ignored<usize>,
     patch_size: Ignored<usize>,
     hook_block_ids: Ignored<Vec<usize>>,
@@ -78,15 +126,54 @@ pub struct DepthAnything3<B: Backend> {
 
 pub struct DepthAnything3Inference<B: Backend> {
     pub depth: Tensor<B, 3>,
+    pub depth_confidence: Option<Tensor<B, 3>>,
+    pub aux: Option<Tensor<B, 4>>,
+    pub aux_confidence: Option<Tensor<B, 3>>,
+    pub pose_encoding: Option<Tensor<B, 3>>,
+    pub extrinsics: Option<Tensor<B, 4>>,
+    pub intrinsics: Option<Tensor<B, 4>>,
+}
+
+pub struct DepthTrace<B: Backend> {
+    pub backbone_tokens: Vec<Tensor<B, 3>>,
+    pub aux_stage_necks: Option<Vec<Tensor<B, 4>>>,
+    pub aux_logits: Option<Tensor<B, 4>>,
+    pub aux_head_input: Option<Tensor<B, 4>>,
+}
+
+enum HeadForwardOutput<B: Backend> {
+    Mono(Tensor<B, 4>),
+    Dual(DualHeadOutput<B>),
 }
 
 impl<B: Backend> DepthAnything3<B> {
     pub fn new(device: &B::Device, config: DepthAnything3Config) -> Self {
-        let backbone = Backbone::new(device, config.image_size, config.patch_size);
-        let head = DepthAnything3Head::new(device, config.head.clone());
+        let backbone = Backbone::new(device, &config);
+        let (head_mono, head_dual) = if config.head.dual_head {
+            (
+                None,
+                Some(DualDepthAnything3Head::new(device, config.head.clone())),
+            )
+        } else {
+            (
+                Some(DepthAnything3Head::new(device, config.head.clone())),
+                None,
+            )
+        };
+        let camera_encoder = config
+            .camera_encoder
+            .clone()
+            .map(|cfg| CameraEncoder::new(device, cfg));
+        let camera_decoder = config
+            .camera_decoder
+            .clone()
+            .map(|cfg| CameraDecoder::new(device, cfg));
         Self {
             backbone,
-            head,
+            head_mono,
+            head_dual,
+            camera_encoder,
+            camera_decoder,
             img_size: Ignored(config.image_size),
             patch_size: Ignored(config.patch_size),
             hook_block_ids: Ignored(config.hook_block_ids),
@@ -95,6 +182,162 @@ impl<B: Backend> DepthAnything3<B> {
     }
 
     pub fn infer(&self, input: Tensor<B, 4>) -> DepthAnything3Inference<B> {
+        self.infer_with_context(input, None, None)
+    }
+
+    pub fn infer_with_camera(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Tensor<B, 4>,
+        intrinsics: Tensor<B, 4>,
+    ) -> DepthAnything3Inference<B> {
+        self.infer_with_context(input, Some(extrinsics), Some(intrinsics))
+    }
+
+    pub fn infer_with_trace(
+        &self,
+        input: Tensor<B, 4>,
+    ) -> (DepthAnything3Inference<B>, DepthTrace<B>) {
+        let (head_output, camera_prediction, hooks) =
+            self.forward_with_camera_internal(input, None, None);
+        let aux_stage_necks = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_stage_necks.clone()),
+            _ => None,
+        };
+        let aux_logits = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_logits.clone()),
+            _ => None,
+        };
+        let aux_head_input = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_head_input.clone()),
+            _ => None,
+        };
+        let inference = self.finalize_inference(head_output, camera_prediction);
+        let backbone_tokens = hooks
+            .into_iter()
+            .map(|hook| hook.patches)
+            .collect::<Vec<_>>();
+        (
+            inference,
+            DepthTrace {
+                backbone_tokens,
+                aux_stage_necks,
+                aux_logits,
+                aux_head_input,
+            },
+        )
+    }
+
+    pub fn infer_raw(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+        match self.forward_with_camera(input, None, None).0 {
+            HeadForwardOutput::Mono(logits) => logits,
+            HeadForwardOutput::Dual(output) => output.depth_logits,
+        }
+    }
+
+    pub fn infer_from_tokens(
+        &self,
+        patches: &[Tensor<B, 3>],
+        height: usize,
+        width: usize,
+    ) -> (
+        DepthAnything3Inference<B>,
+        Option<Vec<Tensor<B, 4>>>,
+        Option<Tensor<B, 4>>,
+        Option<Tensor<B, 4>>,
+    ) {
+        let expected_tokens =
+            (height / self.patch_size.0).max(1) * (width / self.patch_size.0).max(1);
+        let patch_start = patches
+            .first()
+            .map(|tensor| tensor.shape().dims::<3>()[1])
+            .filter(|&tokens| tokens == expected_tokens)
+            .map(|_| 0)
+            .unwrap_or(self.patch_token_start.0);
+        let head_output = if let Some(head) = &self.head_mono {
+            let inputs = patches.iter().cloned().collect::<Vec<_>>();
+            HeadForwardOutput::Mono(head.forward_raw(
+                &inputs,
+                height,
+                width,
+                patch_start,
+                self.patch_size.0,
+            ))
+        } else if let Some(head) = &self.head_dual {
+            let hooks = patches
+                .iter()
+                .cloned()
+                .map(|patches| DinoIntermediate {
+                    patches,
+                    camera: None,
+                })
+                .collect::<Vec<_>>();
+            HeadForwardOutput::Dual(head.forward_dual(
+                &hooks,
+                height,
+                width,
+                patch_start,
+                self.patch_size.0,
+            ))
+        } else {
+            panic!("DepthAnything3 has no head variant configured");
+        };
+        let aux_stage_necks = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_stage_necks.clone()),
+            _ => None,
+        };
+        let aux_logits = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_logits.clone()),
+            _ => None,
+        };
+        let aux_head_input = match &head_output {
+            HeadForwardOutput::Dual(output) => Some(output.aux_head_input.clone()),
+            _ => None,
+        };
+        let inference = self.finalize_inference(head_output, None);
+        (inference, aux_stage_necks, aux_logits, aux_head_input)
+    }
+
+    fn select_depth_channel(&self, tensor: Tensor<B, 4>) -> Tensor<B, 3> {
+        if let Some(head) = &self.head_mono {
+            head.select_depth_channel(tensor)
+        } else {
+            panic!("DepthAnything3 mono head not configured");
+        }
+    }
+
+    fn infer_with_context(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Option<Tensor<B, 4>>,
+        intrinsics: Option<Tensor<B, 4>>,
+    ) -> DepthAnything3Inference<B> {
+        let (head_output, camera_prediction) =
+            self.forward_with_camera(input, extrinsics, intrinsics);
+        self.finalize_inference(head_output, camera_prediction)
+    }
+
+    fn forward_with_camera(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Option<Tensor<B, 4>>,
+        intrinsics: Option<Tensor<B, 4>>,
+    ) -> (HeadForwardOutput<B>, Option<CameraPrediction<B>>) {
+        let (head_output, camera_prediction, _) =
+            self.forward_with_camera_internal(input, extrinsics, intrinsics);
+        (head_output, camera_prediction)
+    }
+
+    fn forward_with_camera_internal(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Option<Tensor<B, 4>>,
+        intrinsics: Option<Tensor<B, 4>>,
+    ) -> (
+        HeadForwardOutput<B>,
+        Option<CameraPrediction<B>>,
+        Vec<DinoIntermediate<B>>,
+    ) {
         let dims = input.shape().dims::<4>();
         let height = dims[2];
         let width = dims[3];
@@ -111,23 +354,46 @@ impl<B: Backend> DepthAnything3<B> {
             self.patch_size.0
         );
 
-        let (_, hooks) = self
-            .backbone
-            .forward_with_hooks(input, &self.hook_block_ids.0);
+        let camera_token = match (&self.camera_encoder, extrinsics, intrinsics) {
+            (Some(encoder), Some(extr), Some(intr)) => {
+                Some(encoder.forward(extr, intr, height, width))
+            }
+            _ => None,
+        };
+
+        let (_, hooks) =
+            self.backbone
+                .forward_with_hooks(input, &self.hook_block_ids.0, camera_token);
         assert!(
             hooks.len() >= self.hook_block_ids.0.len(),
             "Backbone returned fewer hooks ({}) than requested ({})",
             hooks.len(),
             self.hook_block_ids.0.len()
         );
-        let depth = self.head.forward(
-            &hooks,
-            height,
-            width,
-            self.patch_token_start.0,
-            self.patch_size.0,
-        );
-        DepthAnything3Inference { depth }
+        let patch_start = 0;
+        let head_output = if let Some(head) = &self.head_mono {
+            let patches: Vec<Tensor<B, 3>> =
+                hooks.iter().map(|hook| hook.patches.clone()).collect();
+            HeadForwardOutput::Mono(head.forward_raw(
+                &patches,
+                height,
+                width,
+                patch_start,
+                self.patch_size.0,
+            ))
+        } else if let Some(head) = &self.head_dual {
+            HeadForwardOutput::Dual(head.forward_dual(
+                &hooks,
+                height,
+                width,
+                patch_start,
+                self.patch_size.0,
+            ))
+        } else {
+            panic!("DepthAnything3 has no head variant configured");
+        };
+        let camera_prediction = self.decode_camera(&hooks, height, width);
+        (head_output, camera_prediction, hooks)
     }
 
     pub fn img_size(&self) -> usize {
@@ -136,6 +402,58 @@ impl<B: Backend> DepthAnything3<B> {
 
     pub fn patch_size(&self) -> usize {
         self.patch_size.0
+    }
+
+    fn decode_camera(
+        &self,
+        hooks: &[DinoIntermediate<B>],
+        height: usize,
+        width: usize,
+    ) -> Option<CameraPrediction<B>> {
+        let decoder = self.camera_decoder.as_ref()?;
+        let hook = hooks.last()?;
+        let camera_tokens = hook.camera.as_ref()?;
+        let features = camera_tokens.clone().unsqueeze_dim::<3>(1);
+        Some(decoder.forward(features, None, height, width))
+    }
+
+    fn finalize_inference(
+        &self,
+        head_output: HeadForwardOutput<B>,
+        camera_prediction: Option<CameraPrediction<B>>,
+    ) -> DepthAnything3Inference<B> {
+        let (pose_encoding, extrinsics, intrinsics) = if let Some(prediction) = camera_prediction {
+            (
+                Some(prediction.pose_encoding),
+                Some(prediction.extrinsics),
+                Some(prediction.intrinsics),
+            )
+        } else {
+            (None, None, None)
+        };
+        match head_output {
+            HeadForwardOutput::Mono(logits) => {
+                let depth = self.select_depth_channel(logits);
+                DepthAnything3Inference {
+                    depth,
+                    depth_confidence: None,
+                    aux: None,
+                    aux_confidence: None,
+                    pose_encoding,
+                    extrinsics,
+                    intrinsics,
+                }
+            }
+            HeadForwardOutput::Dual(output) => DepthAnything3Inference {
+                depth: output.depth,
+                depth_confidence: Some(output.depth_confidence),
+                aux: Some(output.aux),
+                aux_confidence: Some(output.aux_confidence),
+                pose_encoding,
+                extrinsics,
+                intrinsics,
+            },
+        }
     }
 }
 

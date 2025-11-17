@@ -2253,12 +2253,11 @@ dependencies = [
 [[package]]
 name = "burn_dino"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96141bff70c0b3bb6ab51ab8e9b01fce0a61332115f361fb42212e830fa2dcd8"
 dependencies = [
  "burn",
  "console_error_panic_hook",
  "safetensors 0.6.2",
+ "serde",
  "wasm-bindgen",
  "web-sys",
 ]

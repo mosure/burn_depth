@@ -64,6 +64,7 @@ backend_wgpu = ["burn/wgpu", "burn_dino/backend_wgpu", "half"]
 [dependencies]
 burn = "0.19"
 burn_dino = { version = "0.5.2", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 half = { version = "2", optional = true }
 
@@ -95,7 +96,6 @@ features = [
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 futures-intrusive = { version = "0.5.0" }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 pollster = { version = "0.4.0" }
 safetensors = "0.6"
 wgpu = "26.0"
@@ -104,6 +104,7 @@ clap = { version = "4.5", features = ["derive"] }
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", tag = "v0.17.3" }
+burn_dino = { path = "../burn_dino" }
 
 
 [profile.dev.package."*"]
@@ -139,6 +140,11 @@ path = "example/inference.rs"
 [[example]]
 name = "correctness"
 path = "example/correctness.rs"
+
+[[example]]
+name = "da3_small_correctness"
+path = "example/da3_small_correctness.rs"
+required-features = ["backend_ndarray"]
 
 
 [[bench]]

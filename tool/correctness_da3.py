@@ -17,6 +17,10 @@ REPO_SRC = Path("target/depth-anything-3/src").resolve()
 sys.path.append(str(REPO_SRC))
 
 from depth_anything_3.cfg import create_object, load_config  # type: ignore  # noqa: E402
+from depth_anything_3.model.utils.transform import (  # type: ignore  # noqa: E402
+    pose_encoding_to_extri_intri,
+)
+from depth_anything_3.utils.geometry import affine_inverse  # type: ignore  # noqa: E402
 
 
 def load_model(checkpoint: Path, config: Path, device: torch.device) -> torch.nn.Module:
@@ -103,6 +107,72 @@ def preprocess(image_path: Path, size: int) -> torch.Tensor:
     return tensor
 
 
+def collect_aux_stage_necks(
+    head: torch.nn.Module,
+    feats,
+    height: int,
+    width: int,
+) -> tuple[list[torch.Tensor], torch.Tensor | None, torch.Tensor | None]:
+    modules = getattr(head.scratch, "output_conv1_aux", None)
+    if modules is None:
+        return [], None
+    captured = {}
+    handles = []
+    logits_capture: dict[str, torch.Tensor] = {}
+    logits_handle = None
+    logits_pre_handle = None
+
+    def logits_hook(_module, _input, output):
+        logits_capture["tensor"] = output.detach().cpu()
+
+    def logits_pre_hook(_module, inputs):
+        if isinstance(inputs, tuple) and inputs:
+            logits_capture["input"] = inputs[0].detach().cpu()
+
+    def make_hook(idx: int):
+        def hook(_module, _input, output):
+            captured[idx] = output.detach().cpu()
+
+        return hook
+
+    for idx, module in enumerate(modules):
+        handles.append(module.register_forward_hook(make_hook(idx)))
+    target_module = getattr(head.scratch, "output_conv2_aux", None)
+    if target_module:
+        logits_pre_handle = target_module[-1].register_forward_pre_hook(logits_pre_hook)
+        logits_handle = target_module[-1].register_forward_hook(logits_hook)
+    try:
+        with torch.inference_mode():
+            head(feats, height, width, patch_start_idx=0)
+    finally:
+        for handle in handles:
+            handle.remove()
+        if logits_handle:
+            logits_handle.remove()
+        if logits_pre_handle:
+            logits_pre_handle.remove()
+    if not captured:
+        return [], None, None
+    B, S, _, _ = feats[0][0].shape
+    stages = []
+    for idx in range(len(captured)):
+        tensor = captured[idx]
+        dims = tensor.shape
+        reshaped = tensor.reshape(B, S, dims[1], dims[2], dims[3])
+        stages.append(reshaped[:, 0].contiguous())
+    logits = None
+    if "tensor" in logits_capture:
+        tensor = logits_capture["tensor"]
+        dims = tensor.shape
+        logits = tensor.reshape(B, S, dims[1], dims[2], dims[3])[:, 0].contiguous()
+    head_input = None
+    if "input" in logits_capture:
+        tensor = logits_capture["input"]
+        dims = tensor.shape
+        head_input = tensor.reshape(B, S, dims[1], dims[2], dims[3])[:, 0].contiguous()
+    return stages, logits, head_input
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate Depth Anything 3 PyTorch references for correctness tests."
@@ -139,9 +209,25 @@ def main() -> None:
         default=518,
         help="Square resolution applied before inference (default: 518).",
     )
+    parser.add_argument(
+        "--skip-intermediates",
+        action="store_true",
+        help="Do not dump intermediate backbone tokens to the reference file.",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        choices=["cpu", "cuda"],
+        default="cpu",
+        help="Device used to run the PyTorch reference (default: cpu).",
+    )
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    requested_device = args.device
+    if requested_device == "cuda" and not torch.cuda.is_available():
+        print("CUDA requested but not available; falling back to CPU.")
+        requested_device = "cpu"
+    device = torch.device(requested_device)
     model = load_model(args.checkpoint, args.config, device)
     if os.environ.get("DA3_LOAD_INPUT"):
         tensor = load_burn_input(Path(os.environ["DA3_LOAD_INPUT"]))
@@ -149,17 +235,79 @@ def main() -> None:
         tensor = load_burn_input(Path("target/da3_input_tensor.bin"))
     else:
         tensor = preprocess(args.image, args.resize)
+    tensor_for_save = tensor.clone()
     tensor = tensor.to(device)
     with torch.inference_mode():
-        output = model(tensor)
-    depth = output["depth"].detach().cpu()
-    if depth.ndim == 4:
-        depth = depth.squeeze(0).squeeze(0)
-    elif depth.ndim == 3:
-        depth = depth.squeeze(0)
-    metric_depth = depth.unsqueeze(-1).contiguous()
+        feats, aux_feats = model.backbone(
+            tensor,
+            cam_token=None,
+            export_feat_layers=[],
+        )
+        raw_feats = feats
+        output = model._process_depth_head(feats, tensor.shape[-2], tensor.shape[-1])
+        pose_encoding = None
+        extrinsics = None
+        intrinsics = None
+        if model.cam_dec is not None:
+            pose_encoding = model.cam_dec(raw_feats[-1][1])
+            c2w, ixt = pose_encoding_to_extri_intri(
+                pose_encoding, (tensor.shape[-2], tensor.shape[-1])
+            )
+            extrinsics = affine_inverse(c2w)
+            intrinsics = ixt
+        aux_stage_necks, aux_logits, aux_head_input = collect_aux_stage_necks(
+            model.head, raw_feats, tensor.shape[-2], tensor.shape[-1]
+        )
+    depth = output["depth"].detach().cpu().squeeze(1)
+    depth_conf = output["depth_conf"].detach().cpu().squeeze(1)
+    ray = output.get("ray", None)
+    if ray is not None:
+        ray = ray.detach().cpu()
+        if ray.ndim == 5:
+            ray = ray.squeeze(1)
+        ray = ray.permute(0, 3, 1, 2).contiguous()
+    ray_conf = output.get("ray_conf", None)
+    if ray_conf is not None:
+        ray_conf = ray_conf.detach().cpu()
+        if ray_conf.ndim == 4:
+            ray_conf = ray_conf.squeeze(1)
+    metric_depth = depth.contiguous()
+    metric_input = tensor_for_save.squeeze(1).contiguous()
+    tensors_to_save = {
+        "depth": metric_depth,
+        "metric_input": metric_input,
+        "depth_confidence": depth_conf.contiguous(),
+    }
+    if ray is not None:
+        tensors_to_save["ray"] = ray.contiguous()
+    if ray_conf is not None:
+        tensors_to_save["ray_confidence"] = ray_conf.contiguous()
+    if pose_encoding is not None:
+        tensors_to_save["pose_encoding"] = pose_encoding.detach().cpu().contiguous()
+    if extrinsics is not None:
+        tensors_to_save["extrinsics"] = extrinsics.detach().cpu().contiguous()
+    if intrinsics is not None:
+        tensors_to_save["intrinsics"] = intrinsics.detach().cpu().contiguous()
+    if not args.skip_intermediates:
+        B, S, N, C = raw_feats[0][0].shape
+        for idx, feat in enumerate(raw_feats):
+            tokens = (
+                feat[0]
+                .reshape(B * S, N, C)
+                .detach()
+                .cpu()
+                .contiguous()
+            )
+            tensors_to_save[f"backbone_tokens.stage{idx}"] = tokens
+        if aux_stage_necks:
+            for idx, stage in enumerate(aux_stage_necks):
+                tensors_to_save[f"aux_stage_necks.stage{idx}"] = stage.contiguous()
+        if aux_logits is not None:
+            tensors_to_save["aux_logits"] = aux_logits.contiguous()
+        if aux_head_input is not None:
+            tensors_to_save["aux_head_input"] = aux_head_input.contiguous()
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    save_file({"metric_depth": metric_depth}, str(args.out))
+    save_file(tensors_to_save, str(args.out))
     print(f"Saved DA3 reference tensors to {args.out}")
 
 

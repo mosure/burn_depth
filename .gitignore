@@ -15,7 +15,6 @@ __pycache__/
 *.ply
 *.gcloud
 *.safetensors
-assets/model/
 
 .DS_Store
 
@@ -24,11 +23,11 @@ test_depth.png
 screenshots/
 headless_output/
 www/assets/
-crates/bevy_burn_dino/assets/
-crates/bevy_burn_dino/www/assets/
+crates/bevy_burn_depth/assets/
+crates/bevy_burn_depth/www/assets/
 
 assets/images/
-assets/models/
+assets/model/
 assets/pca/
 output/
 sandbox/

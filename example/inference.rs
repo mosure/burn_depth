@@ -1,10 +1,5 @@
 #![recursion_limit = "256"]
 
-#[path = "common.rs"]
-mod common;
-
-use common::resize_with_bicubic;
-
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -14,7 +9,7 @@ use burn::prelude::*;
 use burn_depth::{
     InferenceBackend,
     inference::{DepthPrediction, infer_from_rgb},
-    model::{AnyDepthModel, DepthModelKind, depth_anything3::DepthAnything3},
+    model::{AnyDepthModel, DepthModelKind, ImageCropRegion, PreparedModelImage},
 };
 use clap::{Parser, ValueEnum};
 use image::{GenericImageView, RgbImage};
@@ -50,21 +45,6 @@ impl From<ModelArg> for DepthModelKind {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct CropRegion {
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-}
-
-struct PreparedDa3Input {
-    width: usize,
-    height: usize,
-    rgb: RgbImage,
-    crop: Option<CropRegion>,
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let device = <InferenceBackend as Backend>::Device::default();
@@ -88,20 +68,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|err| format!("Failed to load image `{}`: {err}", image_path.display()))?;
     let (orig_width, orig_height) = image.dimensions();
     let base_rgb = image.to_rgb8();
-    let mut crop_region: Option<CropRegion> = None;
-    let (width, height, rgb) = if let Some(da3) = model.as_depth_anything3() {
-        let prepared = prepare_da3_input(&base_rgb, da3)?;
-        crop_region = prepared.crop;
-        (prepared.width, prepared.height, prepared.rgb)
-    } else if let Some(resolution) = model.preferred_input_resolution() {
-        let target = u32::try_from(resolution)
-            .map_err(|_| format!("Model requested resolution {resolution} outside u32 range"))?;
-        let resized = resize_with_bicubic(&base_rgb, target, target)
-            .map_err(|err| format!("Failed to resize image for model input: {err}"))?;
-        (resolution, resolution, resized)
-    } else {
-        (orig_width as usize, orig_height as usize, base_rgb)
-    };
+    let PreparedModelImage {
+        width,
+        height,
+        rgb,
+        crop: crop_region,
+    } = model.prepare_input_image(&base_rgb)?;
 
     let result =
         infer_from_rgb::<InferenceBackend, _>(&model, rgb.as_raw(), width, height, &device)
@@ -128,59 +100,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn prepare_da3_input(
-    base_rgb: &RgbImage,
-    model: &DepthAnything3<InferenceBackend>,
-) -> Result<PreparedDa3Input, String> {
-    let preferred = model.img_size();
-    let (orig_width, orig_height) = (base_rgb.width() as usize, base_rgb.height() as usize);
-
-    if orig_width == preferred && orig_height == preferred {
-        return Ok(PreparedDa3Input {
-            width: preferred,
-            height: preferred,
-            rgb: base_rgb.clone(),
-            crop: None,
-        });
-    }
-
-    let longest = orig_width.max(orig_height).max(1) as f32;
-    let scale = preferred as f32 / longest;
-    let mut resized_width = (orig_width as f32 * scale).round() as usize;
-    let mut resized_height = (orig_height as f32 * scale).round() as usize;
-    resized_width = resized_width.clamp(1, preferred);
-    resized_height = resized_height.clamp(1, preferred);
-
-    let resized = resize_with_bicubic(base_rgb, resized_width as u32, resized_height as u32)
-        .map_err(|err| format!("Failed to resize image for DA3 input: {err}"))?;
-
-    let mut canvas = RgbImage::new(preferred as u32, preferred as u32);
-    let x_offset = (preferred - resized_width) / 2;
-    let y_offset = (preferred - resized_height) / 2;
-    for y in 0..resized_height {
-        for x in 0..resized_width {
-            let pixel = resized.get_pixel(x as u32, y as u32);
-            canvas.put_pixel((x_offset + x) as u32, (y_offset + y) as u32, *pixel);
-        }
-    }
-
-    Ok(PreparedDa3Input {
-        width: preferred,
-        height: preferred,
-        rgb: canvas,
-        crop: Some(CropRegion {
-            x: x_offset,
-            y: y_offset,
-            width: resized_width,
-            height: resized_height,
-        }),
-    })
-}
-
 fn save_depth_map<B: Backend>(
     prediction: &DepthPrediction<B>,
     output_path: &Path,
-    crop: Option<CropRegion>,
+    crop: Option<ImageCropRegion>,
     target_dims: Option<(usize, usize)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let depth_data = prediction.depth.clone().into_data().convert::<f32>();
@@ -332,7 +255,7 @@ fn crop_depth_field(
     values: &[f32],
     width: usize,
     height: usize,
-    region: CropRegion,
+    region: ImageCropRegion,
 ) -> Result<Vec<f32>, String> {
     if region.x + region.width > width || region.y + region.height > height {
         return Err(format!(
