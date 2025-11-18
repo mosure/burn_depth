@@ -248,8 +248,6 @@ fn process_frames(
         let preferred_resolution = depth_model.preferred_resolution;
         let task = thread_pool.spawn({
             let target = image_entity;
-            let patch_size = patch_size;
-            let preferred_resolution = preferred_resolution;
             async move {
                 let tensor = process_frame(
                     frame,
@@ -506,7 +504,7 @@ fn setup_ui(
                                 depth_texture.width.max(1) as usize,
                                 4,
                             ],
-                            &burn_device.device().unwrap(),
+                            burn_device.device().unwrap(),
                         ),
                         upload: true,
                         direction: BindingDirection::BurnToBevy,

@@ -36,6 +36,7 @@ impl DepthModelKind {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum AnyDepthModel<B: Backend> {
     DepthPro(depth_pro::DepthPro<B>),
@@ -182,7 +183,7 @@ pub fn prepare_depth_anything3_image(
     scaled_width = scaled_width.max(target);
     scaled_height = scaled_height.max(target);
 
-    let mut resized = imageops::resize(
+    let resized = imageops::resize(
         image,
         scaled_width as u32,
         scaled_height as u32,
@@ -192,7 +193,7 @@ pub fn prepare_depth_anything3_image(
     let crop_x = (scaled_width.saturating_sub(target)) / 2;
     let crop_y = (scaled_height.saturating_sub(target)) / 2;
     let cropped = imageops::crop_imm(
-        &mut resized,
+        &resized,
         crop_x as u32,
         crop_y as u32,
         target as u32,

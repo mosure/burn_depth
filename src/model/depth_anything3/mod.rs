@@ -257,6 +257,7 @@ impl<B: Backend> DepthAnything3<B> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn infer_from_tokens(
         &self,
         patches: &[Tensor<B, 3>],
@@ -277,7 +278,7 @@ impl<B: Backend> DepthAnything3<B> {
             .map(|_| 0)
             .unwrap_or(self.patch_token_start.0);
         let head_output = if let Some(head) = &self.head_mono {
-            let inputs = patches.iter().cloned().collect::<Vec<_>>();
+            let inputs = patches.to_vec();
             HeadForwardOutput::Mono(head.forward_raw(
                 &inputs,
                 height,

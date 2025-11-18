@@ -270,13 +270,12 @@ fn extri_intri_to_pose_encoding<B: Backend>(
         ],
         1,
     );
-    let pose = Tensor::cat(vec![translation_flat, quaternion.clone(), fov_tensor], 1).reshape([
+
+    Tensor::cat(vec![translation_flat, quaternion.clone(), fov_tensor], 1).reshape([
         batch as i32,
         views as i32,
         target_dim as i32,
-    ]);
-
-    pose
+    ])
 }
 
 fn pose_encoding_to_extri_intri<B: Backend>(

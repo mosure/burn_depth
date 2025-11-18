@@ -80,15 +80,15 @@ impl DepthAnything3HeadConfig {
 
 fn build_layer_norm_flags(levels: usize, default: bool, custom: Option<&Vec<usize>>) -> Vec<bool> {
     let mut flags = vec![default; levels];
-    if let Some(indices) = custom {
-        if !indices.is_empty() {
+    if let Some(indices) = custom
+        && !indices.is_empty()
+    {
             flags.fill(false);
             for &idx in indices {
                 if idx < levels {
                     flags[idx] = true;
                 }
             }
-        }
     }
     flags
 }
@@ -105,6 +105,7 @@ pub enum HeadActivation {
     Tanh,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for HeadActivation {
     fn default() -> Self {
         HeadActivation::Linear
@@ -239,8 +240,8 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         let pw = width / patch_size;
 
         let mut resized = Vec::with_capacity(4);
-        for stage in 0..4 {
-            let tokens = hooks[stage].patches.clone();
+        for (stage, hook) in hooks.iter().enumerate().take(4) {
+            let tokens = hook.patches.clone();
             resized.push(self.prepare_stage(tokens, stage, ph, pw, patch_start_idx, height, width));
         }
 
@@ -267,6 +268,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_stage(
         &self,
         tokens: Tensor<B, 3>,
@@ -578,8 +580,8 @@ impl<B: Backend> DepthAnything3Head<B> {
         let pw = width / patch_size;
 
         let mut resized = Vec::with_capacity(4);
-        for stage in 0..4 {
-            let tokens = hooks[stage].clone();
+        for (stage, hook) in hooks.iter().enumerate().take(4) {
+            let tokens = hook.clone();
             resized.push(self.prepare_stage(tokens, stage, ph, pw, patch_start_idx, height, width));
         }
 
@@ -613,6 +615,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare_stage(
         &self,
         tokens: Tensor<B, 3>,

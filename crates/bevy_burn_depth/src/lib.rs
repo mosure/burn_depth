@@ -113,7 +113,7 @@ fn prepare_input_frame(
         let offset_x = (width - crop_width) / 2;
         let offset_y = (height - crop_height) / 2;
         frame = imageops::crop_imm(
-            &mut frame,
+            &frame,
             offset_x as u32,
             offset_y as u32,
             crop_width as u32,
