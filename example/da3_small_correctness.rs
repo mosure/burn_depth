@@ -9,7 +9,9 @@ use burn::record::{HalfPrecisionSettings, NamedMpkFileRecorder};
 use burn_depth::{
     inference::rgb_to_input_tensor,
     model::{
-        depth_anything3::{with_model_load_stack, DepthAnything3, DepthAnything3Config, DepthTrace},
+        depth_anything3::{
+            DepthAnything3, DepthAnything3Config, DepthTrace, with_model_load_stack,
+        },
         prepare_depth_anything3_image,
     },
 };
@@ -46,8 +48,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = DepthAnything3Config::small();
     let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
     let model = with_model_load_stack(|| {
-        DepthAnything3::<NdBackend>::new(&device, config)
-            .load_file("assets/model/da3_small.mpk", &recorder, &device)
+        DepthAnything3::<NdBackend>::new(&device, config).load_file(
+            "assets/model/da3_small.mpk",
+            &recorder,
+            &device,
+        )
     })
     .map_err(|err| format!("Failed to load DA3 small checkpoint: {err}"))?;
 

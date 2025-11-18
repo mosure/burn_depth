@@ -15,20 +15,19 @@ use bevy::{
     ecs::world::CommandQueue,
     prelude::*,
     render::{
+        RenderPlugin,
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
-        RenderPlugin,
     },
-    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
+    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
     ui::widget::ImageNode,
-    window::WindowResolution,
 };
-use bevy_args::{parse_args, Deserialize, Parser, Serialize};
+use bevy_args::{Deserialize, Parser, Serialize, parse_args};
 use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use bevy_burn_depth::{platform::camera::receive_image, process_frame};
 use burn::prelude::*;
-use burn_wgpu::Wgpu;
 use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
+use burn_wgpu::Wgpu;
 use image::RgbImage;
 
 const DEFAULT_CHECKPOINT: &str = "assets/model/da3_small.mpk";
@@ -75,7 +74,7 @@ mod io {
         record::{HalfPrecisionSettings, NamedMpkFileRecorder},
     };
     use burn_depth::model::depth_anything3::{
-        with_model_load_stack, DepthAnything3, DepthAnything3Config,
+        DepthAnything3, DepthAnything3Config, with_model_load_stack,
     };
 
     pub async fn load_model<B: Backend>(
@@ -95,22 +94,22 @@ mod io {
 mod io {
     use burn::{
         prelude::*,
-        record::{HalfPrecisionSettings, NamedMpkBytesRecorder},
+        record::{HalfPrecisionSettings, NamedMpkBytesRecorder, Recorder},
     };
     use burn_depth::model::depth_anything3::{
-        with_model_load_stack, DepthAnything3, DepthAnything3Config,
+        DepthAnything3, DepthAnything3Config, with_model_load_stack,
     };
     use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{window, Request, RequestInit, RequestMode, Response};
+    use web_sys::{Request, RequestInit, RequestMode, Response, window};
 
     pub async fn load_model<B: Backend>(
         config: DepthAnything3Config,
         checkpoint: &str,
         device: &B::Device,
     ) -> DepthAnything3<B> {
-        let mut opts = RequestInit::new();
+        let opts = RequestInit::new();
         opts.set_method("GET");
         opts.set_mode(RequestMode::Cors);
 
@@ -157,7 +156,11 @@ struct DepthModelState {
 }
 
 impl DepthModelState {
-    fn new(checkpoint: PathBuf, config: DepthAnything3Config, normalize_relative_depth: bool) -> Self {
+    fn new(
+        checkpoint: PathBuf,
+        config: DepthAnything3Config,
+        normalize_relative_depth: bool,
+    ) -> Self {
         Self {
             checkpoint,
             preferred_resolution: Some(config.image_size),
@@ -372,7 +375,7 @@ fn spawn_depth_model_load_task(
     checkpoint: PathBuf,
     device: <Wgpu as Backend>::Device,
 ) -> Task<DepthModelLoadResult> {
-    let checkpoint = checkpoint.to_string_lossy().to_string();
+    let checkpoint = normalize_web_checkpoint(&checkpoint);
     AsyncComputeTaskPool::get().spawn(async move {
         let depth = io::load_model::<Wgpu>(config, &checkpoint, &device).await;
         let resolution = depth.img_size();
@@ -381,6 +384,21 @@ fn spawn_depth_model_load_task(
             resolution,
         }
     })
+}
+
+#[cfg(feature = "web")]
+fn normalize_web_checkpoint(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with("./")
+        || normalized.starts_with('/')
+        || normalized.starts_with("http://")
+        || normalized.starts_with("https://")
+        || normalized.starts_with("data:")
+    {
+        normalized
+    } else {
+        format!("./{normalized}")
+    }
 }
 
 fn finish_depth_model_load(mut depth_model: ResMut<DepthModelState>) {
@@ -504,7 +522,6 @@ fn setup_ui(
     commands.spawn(Camera2d);
 }
 
-
 pub fn viewer_app(args: BevyBurnDepthConfig) -> App {
     let mut app = App::new();
     app.insert_resource(args.clone());
@@ -528,7 +545,7 @@ pub fn viewer_app(args: BevyBurnDepthConfig) -> App {
     let primary_window = Some(Window {
         mode: bevy::window::WindowMode::Windowed,
         prevent_default_event_handling: false,
-        resolution: WindowResolution::new(1024, 1024),
+        resolution: bevy::window::WindowResolution::new(1024, 1024),
         title,
         #[cfg(feature = "perftest")]
         present_mode: bevy::window::PresentMode::AutoNoVsync,

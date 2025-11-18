@@ -12,7 +12,7 @@ use burn_depth::{
     model::{AnyDepthModel, DepthModelKind, ImageCropRegion, PreparedModelImage},
 };
 use clap::{Parser, ValueEnum};
-use image::{GenericImageView, RgbImage};
+use image::GenericImageView;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Run depth inference using Burn checkpoints.")]

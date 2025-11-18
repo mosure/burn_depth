@@ -247,25 +247,15 @@ fn extri_intri_to_pose_encoding<B: Backend>(
 
     let w2c = extrinsics.reshape([total, 3, 4]);
     let rotation = w2c.clone().slice([0..total, 0..3, 0..3]);
-    let translation = w2c
-        .slice([0..total, 0..3, 3..4])
-        .reshape([total, 3, 1]);
+    let translation = w2c.slice([0..total, 0..3, 3..4]).reshape([total, 3, 1]);
 
     let c2w_rotation = rotation.clone().permute([0, 2, 1]);
-    let c2w_translation = -c2w_rotation
-        .clone()
-        .matmul(translation)
-        .squeeze_dim::<2>(2);
+    let c2w_translation = -c2w_rotation.clone().matmul(translation).squeeze_dim::<2>(2);
     let quaternion = matrix_to_quaternion(c2w_rotation.clone(), &device);
 
     let intr = intrinsics.reshape([total, 3, 3]);
-    let fx = intr
-        .clone()
-        .slice([0..total, 0..1, 0..1])
-        .reshape([total]);
-    let fy = intr
-        .slice([0..total, 1..2, 1..2])
-        .reshape([total]);
+    let fx = intr.clone().slice([0..total, 0..1, 0..1]).reshape([total]);
+    let fy = intr.slice([0..total, 1..2, 1..2]).reshape([total]);
 
     let width_half = scalar_tensor(total, image_width as f32 / 2.0, &device);
     let height_half = scalar_tensor(total, image_height as f32 / 2.0, &device);
@@ -280,11 +270,11 @@ fn extri_intri_to_pose_encoding<B: Backend>(
         ],
         1,
     );
-    let pose = Tensor::cat(
-        vec![translation_flat, quaternion.clone(), fov_tensor],
-        1,
-    )
-    .reshape([batch as i32, views as i32, target_dim as i32]);
+    let pose = Tensor::cat(vec![translation_flat, quaternion.clone(), fov_tensor], 1).reshape([
+        batch as i32,
+        views as i32,
+        target_dim as i32,
+    ]);
 
     pose
 }
@@ -307,10 +297,14 @@ fn pose_encoding_to_extri_intri<B: Backend>(
 
     let rotation = quaternion_to_matrix(quaternion, &device);
     let rotation_t = rotation.clone().permute([0, 2, 1]);
-    let translation_w2c = (-rotation_t.clone().matmul(translation).squeeze_dim::<2>(2))
-        .unsqueeze_dim::<3>(2);
-    let extrinsics = Tensor::cat(vec![rotation_t, translation_w2c], 2)
-        .reshape([batch as i32, views as i32, 3, 4]);
+    let translation_w2c =
+        (-rotation_t.clone().matmul(translation).squeeze_dim::<2>(2)).unsqueeze_dim::<3>(2);
+    let extrinsics = Tensor::cat(vec![rotation_t, translation_w2c], 2).reshape([
+        batch as i32,
+        views as i32,
+        3,
+        4,
+    ]);
 
     let fov_h = fov.clone().slice([0..total, 0..1]).reshape([total]);
     let fov_w = fov.slice([0..total, 1..2]).reshape([total]);
@@ -357,7 +351,7 @@ fn pose_encoding_to_extri_intri<B: Backend>(
         ],
         1,
     )
-        .reshape([batch as i32, views as i32, 3, 3]);
+    .reshape([batch as i32, views as i32, 3, 3]);
 
     (extrinsics, intrinsics)
 }
@@ -366,10 +360,7 @@ fn scalar_tensor<B: Backend>(len: i32, value: f32, device: &B::Device) -> Tensor
     Tensor::<B, 1>::ones([len], device) * value
 }
 
-fn quaternion_to_matrix<B: Backend>(
-    quat: Tensor<B, 2>,
-    device: &B::Device,
-) -> Tensor<B, 3> {
+fn quaternion_to_matrix<B: Backend>(quat: Tensor<B, 2>, device: &B::Device) -> Tensor<B, 3> {
     let total = quat.shape().dims::<2>()[0] as i32;
     let x = quat.clone().slice([0..total, 0..1]).reshape([total]);
     let y = quat.clone().slice([0..total, 1..2]).reshape([total]);
@@ -425,19 +416,40 @@ fn quaternion_to_matrix<B: Backend>(
     .reshape([total, 3, 3])
 }
 
-fn matrix_to_quaternion<B: Backend>(
-    rotation: Tensor<B, 3>,
-    device: &B::Device,
-) -> Tensor<B, 2> {
+fn matrix_to_quaternion<B: Backend>(rotation: Tensor<B, 3>, device: &B::Device) -> Tensor<B, 2> {
     let total = rotation.shape().dims::<3>()[0] as i32;
-    let m00 = rotation.clone().slice([0..total, 0..1, 0..1]).reshape([total]);
-    let m01 = rotation.clone().slice([0..total, 0..1, 1..2]).reshape([total]);
-    let m02 = rotation.clone().slice([0..total, 0..1, 2..3]).reshape([total]);
-    let m10 = rotation.clone().slice([0..total, 1..2, 0..1]).reshape([total]);
-    let m11 = rotation.clone().slice([0..total, 1..2, 1..2]).reshape([total]);
-    let m12 = rotation.clone().slice([0..total, 1..2, 2..3]).reshape([total]);
-    let m20 = rotation.clone().slice([0..total, 2..3, 0..1]).reshape([total]);
-    let m21 = rotation.clone().slice([0..total, 2..3, 1..2]).reshape([total]);
+    let m00 = rotation
+        .clone()
+        .slice([0..total, 0..1, 0..1])
+        .reshape([total]);
+    let m01 = rotation
+        .clone()
+        .slice([0..total, 0..1, 1..2])
+        .reshape([total]);
+    let m02 = rotation
+        .clone()
+        .slice([0..total, 0..1, 2..3])
+        .reshape([total]);
+    let m10 = rotation
+        .clone()
+        .slice([0..total, 1..2, 0..1])
+        .reshape([total]);
+    let m11 = rotation
+        .clone()
+        .slice([0..total, 1..2, 1..2])
+        .reshape([total]);
+    let m12 = rotation
+        .clone()
+        .slice([0..total, 1..2, 2..3])
+        .reshape([total]);
+    let m20 = rotation
+        .clone()
+        .slice([0..total, 2..3, 0..1])
+        .reshape([total]);
+    let m21 = rotation
+        .clone()
+        .slice([0..total, 2..3, 1..2])
+        .reshape([total]);
     let m22 = rotation.slice([0..total, 2..3, 2..3]).reshape([total]);
 
     let ones = scalar_tensor(total, 1.0, device);
@@ -450,17 +462,11 @@ fn matrix_to_quaternion<B: Backend>(
     let qx_trace = ((m21.clone() - m12.clone()) / s_trace.clone()).reshape([total, 1]);
     let qy_trace = ((m02.clone() - m20.clone()) / s_trace.clone()).reshape([total, 1]);
     let qz_trace = ((m10.clone() - m01.clone()) / s_trace.clone()).reshape([total, 1]);
-    let quat_trace = Tensor::stack(
-        vec![
-            qx_trace,
-            qy_trace,
-            qz_trace,
-            qw_trace,
-        ],
-        1,
-    );
+    let quat_trace = Tensor::stack(vec![qx_trace, qy_trace, qz_trace, qw_trace], 1);
 
-    let s_x = ((ones.clone() + m00.clone() - m11.clone() - m22.clone()).clamp_min(1e-6).sqrt()
+    let s_x = ((ones.clone() + m00.clone() - m11.clone() - m22.clone())
+        .clamp_min(1e-6)
+        .sqrt()
         * 2.0)
         .reshape([total]);
     let qx_x = (quarter.clone() * s_x.clone()).reshape([total, 1]);
@@ -469,7 +475,9 @@ fn matrix_to_quaternion<B: Backend>(
     let qz_x = ((m02.clone() + m20.clone()) / (s_x.clone() + eps.clone())).reshape([total, 1]);
     let quat_x = Tensor::stack(vec![qx_x, qy_x, qz_x, qw_x], 1);
 
-    let s_y = ((ones.clone() + m11.clone() - m00.clone() - m22.clone()).clamp_min(1e-6).sqrt()
+    let s_y = ((ones.clone() + m11.clone() - m00.clone() - m22.clone())
+        .clamp_min(1e-6)
+        .sqrt()
         * 2.0)
         .reshape([total]);
     let qy_y = (quarter.clone() * s_y.clone()).reshape([total, 1]);
@@ -478,7 +486,9 @@ fn matrix_to_quaternion<B: Backend>(
     let qz_y = ((m12.clone() + m21.clone()) / (s_y.clone() + eps.clone())).reshape([total, 1]);
     let quat_y = Tensor::stack(vec![qx_y, qy_y, qz_y, qw_y], 1);
 
-    let s_z = ((ones.clone() + m22.clone() - m00.clone() - m11.clone()).clamp_min(1e-6).sqrt()
+    let s_z = ((ones.clone() + m22.clone() - m00.clone() - m11.clone())
+        .clamp_min(1e-6)
+        .sqrt()
         * 2.0)
         .reshape([total]);
     let qz_z = (quarter.clone() * s_z.clone()).reshape([total, 1]);
@@ -488,8 +498,8 @@ fn matrix_to_quaternion<B: Backend>(
     let quat_z = Tensor::stack(vec![qx_z, qy_z, qz_z, qw_z], 1);
 
     let mask_trace = trace.clone().greater_elem(0.0).float();
-    let cond_x = m00.clone().greater(m11.clone()).float()
-        * m00.clone().greater(m22.clone()).float();
+    let cond_x =
+        m00.clone().greater(m11.clone()).float() * m00.clone().greater(m22.clone()).float();
     let mask_x = (ones.clone() - mask_trace.clone()) * cond_x;
     let cond_y = m11.clone().greater(m22.clone()).float();
     let mask_y = (ones.clone() - mask_trace.clone() - mask_x.clone()) * cond_y;
@@ -503,10 +513,7 @@ fn matrix_to_quaternion<B: Backend>(
     quat_trace * mask_trace + quat_x * mask_x + quat_y * mask_y + quat_z * mask_z
 }
 
-fn approx_atan_positive<B: Backend>(
-    x: Tensor<B, 1>,
-    device: &B::Device,
-) -> Tensor<B, 1> {
+fn approx_atan_positive<B: Backend>(x: Tensor<B, 1>, device: &B::Device) -> Tensor<B, 1> {
     let dims = x.shape().dims::<1>()[0] as i32;
     let ones = scalar_tensor(dims, 1.0, device);
     let abs_x = x.clone();

@@ -73,7 +73,7 @@ impl DepthAnything3HeadConfig {
             aux_out1_conv_num: 5,
             aux_output_dim: 7,
             aux_use_layer_norm: true,
-            aux_layer_norm_stages: None,
+            aux_layer_norm_stages: Some(vec![0]),
         }
     }
 }

@@ -16,7 +16,7 @@ use burn_depth::{
     InferenceBackend,
     inference::rgb_to_input_tensor,
     model::{
-        depth_anything3::{with_model_load_stack, DepthAnything3, DepthAnything3Config},
+        depth_anything3::{DepthAnything3, DepthAnything3Config, with_model_load_stack},
         depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
         prepare_depth_anything3_image,
     },
@@ -128,7 +128,7 @@ struct BurnOutputs {
     fovx: f32,
     fovy: f32,
     encoder_features: Vec<FeatureTensor>,
-    decoder_fusions: Vec<FeatureTensor>,
+    // decoder_fusions: Vec<FeatureTensor>,
     encoder_merge_latent0: FeatureTensor,
     encoder_merge_latent1: FeatureTensor,
     encoder_latent0_tokens: FeatureTensor,
@@ -139,8 +139,8 @@ struct BurnOutputs {
     encoder_merge_x1: FeatureTensor,
     encoder_merge_x2: FeatureTensor,
     canonical_inverse_depth: FeatureTensor,
-    decoder_feature: FeatureTensor,
-    decoder_lowres_feature: FeatureTensor,
+    // decoder_feature: FeatureTensor,
+    // decoder_lowres_feature: FeatureTensor,
     head_conv0: FeatureTensor,
     head_deconv: FeatureTensor,
     head_conv1: FeatureTensor,
@@ -375,7 +375,7 @@ fn compute_burn_outputs(
     let (
         _canonical_decoder,
         decoder_feature_tensor,
-        decoder_lowres_tensor,
+        _decoder_lowres_tensor,
         decoder_fusion_tensors,
         _,
     ) = model.forward_with_decoder(feature_input.clone());
@@ -410,10 +410,10 @@ fn compute_burn_outputs(
         shape: canonical_shape,
     };
 
-    let decoder_feature = tensor_to_feature(decoder_feature_tensor)
-        .map_err(|err| format!("failed to fetch decoder feature: {err}"))?;
-    let decoder_lowres_feature = tensor_to_feature(decoder_lowres_tensor)
-        .map_err(|err| format!("failed to fetch decoder lowres feature: {err}"))?;
+    // let decoder_feature = tensor_to_feature(decoder_feature_tensor)
+    //     .map_err(|err| format!("failed to fetch decoder feature: {err}"))?;
+    // let decoder_lowres_feature = tensor_to_feature(decoder_lowres_tensor)
+    //     .map_err(|err| format!("failed to fetch decoder lowres feature: {err}"))?;
     let mut decoder_fusions = Vec::with_capacity(decoder_fusion_tensors.len());
     for (idx, fusion) in decoder_fusion_tensors.into_iter().enumerate() {
         decoder_fusions.push(
@@ -464,7 +464,7 @@ fn compute_burn_outputs(
         fovx,
         fovy,
         encoder_features: burn_features,
-        decoder_fusions,
+        // decoder_fusions,
         encoder_merge_latent0,
         encoder_merge_latent1,
         encoder_latent0_tokens,
@@ -475,8 +475,8 @@ fn compute_burn_outputs(
         encoder_merge_x1,
         encoder_merge_x2,
         canonical_inverse_depth: canonical_feature,
-        decoder_feature,
-        decoder_lowres_feature,
+        // decoder_feature,
+        // decoder_lowres_feature,
         head_conv0,
         head_deconv,
         head_conv1,
@@ -985,7 +985,7 @@ fn compute_da3_outputs(
     let base_rgb = image::open(image_path)
         .map_err(|err| format!("Failed to open image `{}`: {err}", image_path.display()))?
         .to_rgb8();
-    let prepared = prepare_depth_anything3_image(base_rgb, target)
+    let prepared = prepare_depth_anything3_image(&base_rgb, target)
         .map_err(|err| format!("Failed to prepare DA3 input: {err}"))?;
     let resized = prepared.rgb;
     if std::env::var("DA3_DUMP_RESIZED").is_ok() {

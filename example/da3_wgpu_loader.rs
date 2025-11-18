@@ -3,7 +3,7 @@
 use burn::prelude::*;
 use burn::record::{HalfPrecisionSettings, NamedMpkFileRecorder};
 use burn_depth::model::depth_anything3::{
-    with_model_load_stack, DepthAnything3, DepthAnything3Config,
+    DepthAnything3, DepthAnything3Config, with_model_load_stack,
 };
 
 type WgpuBackend = burn::backend::Wgpu<f32>;

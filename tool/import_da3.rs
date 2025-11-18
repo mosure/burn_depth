@@ -160,8 +160,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "$1.reduce.$2",
         )?
         .add_pattern(
-            &format!(r"^({head_prefix}\.scratch\.output_conv2_aux\.\d+)\.2\.(weight|bias)$"),
-            "$1.norm.layer_norm.$2",
+            &format!(r"^({head_prefix}\.scratch\.output_conv2_aux\.\d+)\.2\.weight$"),
+            "$1.norm.layer_norm.gamma",
+        )?
+        .add_pattern(
+            &format!(r"^({head_prefix}\.scratch\.output_conv2_aux\.\d+)\.2\.bias$"),
+            "$1.norm.layer_norm.beta",
         )?
         .add_pattern(
             &format!(r"^({head_prefix}\.scratch\.output_conv2_aux\.\d+)\.5\.(weight|bias)$"),
