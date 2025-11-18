@@ -34,3 +34,32 @@ jobs:
 
     - name: build
       run: cargo build
+
+
+
+  wasm-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        rust-toolchain:
+          - nightly
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup ${{ matrix.rust-toolchain }} rust toolchain with caching
+      uses: brndnmtthws/rust-action@v1
+      with:
+        toolchain: ${{ matrix.rust-toolchain }}
+        components: rustfmt, clippy
+        enable-sccache: "false"
+
+    - name: install wasm32-unknown-unknown
+      run: rustup target add wasm32-unknown-unknown
+
+    - name: build
+      run: cargo build -p bevy_burn_depth --target wasm32-unknown-unknown --no-default-features --features=web
