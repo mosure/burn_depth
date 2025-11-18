@@ -385,7 +385,7 @@ fn spawn_depth_model_load_task(
 }
 
 #[cfg(feature = "web")]
-fn normalize_web_checkpoint(path: &Path) -> String {
+fn normalize_web_checkpoint(path: &std::path::Path) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     if normalized.starts_with("./")
         || normalized.starts_with('/')
