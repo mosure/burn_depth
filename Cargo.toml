@@ -62,7 +62,7 @@ backend_wgpu = ["burn/wgpu", "burn_dino/backend_wgpu", "half"]
 
 
 [dependencies]
-burn_dino = { version = "0.5.2", default-features = false }
+burn_dino = { version = "0.6", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 half = { version = "2", optional = true }
@@ -114,7 +114,6 @@ clap = { version = "4.5", features = ["derive"] }
 
 [patch.crates-io]
 cudarc = { git = "https://github.com/coreylowman/cudarc", tag = "v0.17.3" }
-burn_dino = { path = "../burn_dino" }
 
 
 [profile.dev.package."*"]

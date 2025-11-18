@@ -2128,7 +2128,9 @@ dependencies = [
 
 [[package]]
 name = "burn_dino"
-version = "0.5.2"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8900f0381f8d2b9c919d4ad976049b89dc2b9db01fa7866f466810d0eff3ba38"
 dependencies = [
  "burn",
  "console_error_panic_hook",
