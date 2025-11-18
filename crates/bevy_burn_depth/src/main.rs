@@ -15,26 +15,22 @@ use bevy::{
     ecs::world::CommandQueue,
     prelude::*,
     render::{
+        RenderPlugin,
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
-        RenderPlugin,
     },
-    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
+    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
     ui::widget::ImageNode,
-    window::WindowResolution,
 };
-use bevy_args::{parse_args, Deserialize, Parser, Serialize};
-use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, TransferKind};
+use bevy_args::{Deserialize, Parser, Serialize, parse_args};
+use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use bevy_burn_depth::{platform::camera::receive_image, process_frame};
-use burn::{
-    backend::wgpu::graphics::AutoGraphicsApi,
-    backend::wgpu::{init_setup_async, Wgpu},
-    prelude::*,
-};
-use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
+use burn::prelude::*;
+use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
+use burn_wgpu::Wgpu;
 use image::RgbImage;
 
-const DEFAULT_CHECKPOINT: &str = "assets/model/depth_pro.mpk";
+const DEFAULT_CHECKPOINT: &str = "assets/model/da3_small.mpk";
 const MAX_IN_FLIGHT_TASKS: usize = 1;
 
 #[derive(Resource, Clone, Debug, Serialize, Deserialize, Parser, Reflect)]
@@ -52,6 +48,9 @@ pub struct BevyBurnDepthConfig {
 
     #[arg(long)]
     pub image_path: Option<PathBuf>,
+
+    #[arg(long, default_value = "true")]
+    pub normalize_relative_depth: bool,
 }
 
 impl Default for BevyBurnDepthConfig {
@@ -61,6 +60,7 @@ impl Default for BevyBurnDepthConfig {
             show_fps: true,
             checkpoint: PathBuf::from(DEFAULT_CHECKPOINT),
             image_path: None,
+            normalize_relative_depth: true,
         }
     }
 }
@@ -69,16 +69,24 @@ impl Default for BevyBurnDepthConfig {
 mod io {
     use std::path::Path;
 
-    use burn::prelude::*;
-    use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
+    use burn::{
+        prelude::*,
+        record::{HalfPrecisionSettings, NamedMpkFileRecorder},
+    };
+    use burn_depth::model::depth_anything3::{
+        DepthAnything3, DepthAnything3Config, with_model_load_stack,
+    };
 
     pub async fn load_model<B: Backend>(
-        config: DepthProConfig,
+        config: DepthAnything3Config,
         checkpoint: &Path,
         device: &B::Device,
-    ) -> DepthPro<B> {
-        DepthPro::load_with_config(device, config, checkpoint)
-            .expect("failed to load DepthPro checkpoint")
+    ) -> DepthAnything3<B> {
+        let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
+        with_model_load_stack(|| {
+            DepthAnything3::new(device, config).load_file(checkpoint, &recorder, device)
+        })
+        .expect("failed to load Depth Anything 3 checkpoint")
     }
 }
 
@@ -88,18 +96,20 @@ mod io {
         prelude::*,
         record::{HalfPrecisionSettings, NamedMpkBytesRecorder, Recorder},
     };
-    use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
+    use burn_depth::model::depth_anything3::{
+        DepthAnything3, DepthAnything3Config, with_model_load_stack,
+    };
     use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{window, Request, RequestInit, RequestMode, Response};
+    use web_sys::{Request, RequestInit, RequestMode, Response, window};
 
     pub async fn load_model<B: Backend>(
-        config: DepthProConfig,
+        config: DepthAnything3Config,
         checkpoint: &str,
         device: &B::Device,
-    ) -> DepthPro<B> {
-        let mut opts = RequestInit::new();
+    ) -> DepthAnything3<B> {
+        let opts = RequestInit::new();
         opts.set_method("GET");
         opts.set_mode(RequestMode::Cors);
 
@@ -125,18 +135,46 @@ mod io {
         bytes.copy_to(&mut data);
 
         let record = NamedMpkBytesRecorder::<HalfPrecisionSettings>::default()
-            .load(data, &Default::default())
+            .load(data, device)
             .expect("failed to decode checkpoint");
 
-        let model = DepthPro::new(device, config);
-        model.load_record(record)
+        with_model_load_stack(|| {
+            let model = DepthAnything3::new(device, config);
+            model.load_record(record)
+        })
     }
 }
 
 #[derive(Resource)]
-struct DepthModel<B: Backend> {
-    device: B::Device,
-    model: Arc<Mutex<DepthPro<B>>>,
+struct DepthModelState {
+    checkpoint: PathBuf,
+    config: DepthAnything3Config,
+    preferred_resolution: Option<usize>,
+    model: Option<Arc<Mutex<DepthAnything3<Wgpu>>>>,
+    load_task: Option<Task<DepthModelLoadResult>>,
+    normalize_relative_depth: bool,
+}
+
+impl DepthModelState {
+    fn new(
+        checkpoint: PathBuf,
+        config: DepthAnything3Config,
+        normalize_relative_depth: bool,
+    ) -> Self {
+        Self {
+            checkpoint,
+            preferred_resolution: Some(config.image_size),
+            config,
+            model: None,
+            load_task: None,
+            normalize_relative_depth,
+        }
+    }
+}
+
+struct DepthModelLoadResult {
+    model: DepthAnything3<Wgpu>,
+    resolution: usize,
 }
 
 #[derive(Resource)]
@@ -166,11 +204,16 @@ struct ProcessDepth(Task<CommandQueue>);
 
 fn process_frames(
     mut commands: Commands,
-    depth_model: Res<DepthModel<Wgpu>>,
+    depth_model: Res<DepthModelState>,
     depth_texture: Res<DepthTexture>,
     static_frame: Res<StaticFrame>,
     active_tasks: Query<&ProcessDepth>,
+    burn_device: Option<Res<BurnDevice>>,
 ) {
+    let Some(model) = depth_model.model.as_ref() else {
+        return;
+    };
+
     let Some(image_entity) = depth_texture.entity else {
         return;
     };
@@ -178,6 +221,18 @@ fn process_frames(
     if active_tasks.iter().count() >= MAX_IN_FLIGHT_TASKS {
         return;
     }
+
+    let Some(burn_device) = burn_device else {
+        return;
+    };
+
+    if !burn_device.is_ready() {
+        return;
+    }
+
+    let normalize_relative_depth = depth_model.normalize_relative_depth;
+    let device = burn_device.device().unwrap().clone();
+    let model = model.clone();
 
     let frame_source = if let Some(frame) = static_frame.0.as_ref() {
         Some((**frame).clone())
@@ -188,13 +243,21 @@ fn process_frames(
     if let Some(frame) = frame_source {
         let thread_pool = AsyncComputeTaskPool::get();
         let task_entity = commands.spawn_empty().id();
-        let device = depth_model.device.clone();
-        let model = depth_model.model.clone();
 
+        let patch_size = depth_model.config.patch_size;
+        let preferred_resolution = depth_model.preferred_resolution;
         let task = thread_pool.spawn({
             let target = image_entity;
             async move {
-                let tensor = process_frame(frame, model.clone(), device.clone()).await;
+                let tensor = process_frame(
+                    frame,
+                    model.clone(),
+                    device.clone(),
+                    patch_size,
+                    preferred_resolution,
+                    normalize_relative_depth,
+                )
+                .await;
                 let [tensor_height, tensor_width, _] = tensor.dims();
 
                 let mut queue = CommandQueue::default();
@@ -260,6 +323,97 @@ fn process_frames(
     }
 }
 
+fn begin_depth_model_load(
+    mut depth_model: ResMut<DepthModelState>,
+    burn_device: Option<Res<BurnDevice>>,
+) {
+    if depth_model.model.is_some() || depth_model.load_task.is_some() {
+        return;
+    }
+
+    let Some(burn_device) = burn_device else {
+        return;
+    };
+
+    if !burn_device.is_ready() {
+        return;
+    }
+
+    let checkpoint = depth_model.checkpoint.clone();
+    let config = depth_model.config.clone();
+    let device = burn_device.device().unwrap().clone();
+
+    log("loading depth model...");
+    log(&format!("checkpoint: {}", checkpoint.display()));
+
+    depth_model.load_task = Some(spawn_depth_model_load_task(config, checkpoint, device));
+}
+
+#[cfg(feature = "native")]
+fn spawn_depth_model_load_task(
+    config: DepthAnything3Config,
+    checkpoint: PathBuf,
+    device: <Wgpu as Backend>::Device,
+) -> Task<DepthModelLoadResult> {
+    AsyncComputeTaskPool::get().spawn(async move {
+        log("begin load_model task (native)...");
+        let depth = io::load_model::<Wgpu>(config, checkpoint.as_path(), &device).await;
+        log("load_model task finished.");
+        let resolution = depth.img_size();
+        DepthModelLoadResult {
+            model: depth,
+            resolution,
+        }
+    })
+}
+
+#[cfg(feature = "web")]
+fn spawn_depth_model_load_task(
+    config: DepthAnything3Config,
+    checkpoint: PathBuf,
+    device: <Wgpu as Backend>::Device,
+) -> Task<DepthModelLoadResult> {
+    let checkpoint = normalize_web_checkpoint(&checkpoint);
+    AsyncComputeTaskPool::get().spawn(async move {
+        let depth = io::load_model::<Wgpu>(config, &checkpoint, &device).await;
+        let resolution = depth.img_size();
+        DepthModelLoadResult {
+            model: depth,
+            resolution,
+        }
+    })
+}
+
+#[cfg(feature = "web")]
+fn normalize_web_checkpoint(path: &Path) -> String {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if normalized.starts_with("./")
+        || normalized.starts_with('/')
+        || normalized.starts_with("http://")
+        || normalized.starts_with("https://")
+        || normalized.starts_with("data:")
+    {
+        normalized
+    } else {
+        format!("./{normalized}")
+    }
+}
+
+fn finish_depth_model_load(mut depth_model: ResMut<DepthModelState>) {
+    let Some(task) = depth_model.load_task.as_mut() else {
+        return;
+    };
+
+    if let Some(result) = block_on(future::poll_once(task)) {
+        log(&format!(
+            "depth model ready (inference resolution: {}px)",
+            result.resolution
+        ));
+        depth_model.model = Some(Arc::new(Mutex::new(result.model)));
+        depth_model.load_task = None;
+    }
+}
+
 fn handle_tasks(
     mut commands: Commands,
     mut diagnostics: Diagnostics,
@@ -281,17 +435,6 @@ fn handle_tasks(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn depth_image_setup() -> (&'static [u8], TextureFormat, TransferKind, TextureUsages) {
-    (
-        &[0u8; 4],
-        TextureFormat::Rgba8UnormSrgb,
-        TransferKind::Cpu,
-        TextureUsages::COPY_SRC | TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING,
-    )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 fn depth_image_setup() -> (&'static [u8], TextureFormat, TransferKind, TextureUsages) {
     (
         &[0u8; 16],
@@ -306,10 +449,22 @@ fn depth_image_setup() -> (&'static [u8], TextureFormat, TransferKind, TextureUs
 
 fn setup_ui(
     mut commands: Commands,
-    depth: Res<DepthModel<Wgpu>>,
     mut depth_texture: ResMut<DepthTexture>,
     mut images: ResMut<Assets<Image>>,
+    burn_device: Option<Res<BurnDevice>>,
 ) {
+    if depth_texture.entity.is_some() {
+        return;
+    }
+
+    let Some(burn_device) = burn_device else {
+        return;
+    };
+
+    if !burn_device.is_ready() {
+        return;
+    }
+
     let size = Extent3d {
         width: depth_texture.width.max(1),
         height: depth_texture.height.max(1),
@@ -349,7 +504,7 @@ fn setup_ui(
                                 depth_texture.width.max(1) as usize,
                                 4,
                             ],
-                            &depth.device,
+                            burn_device.device().unwrap(),
                         ),
                         upload: true,
                         direction: BindingDirection::BurnToBevy,
@@ -388,7 +543,7 @@ pub fn viewer_app(args: BevyBurnDepthConfig) -> App {
     let primary_window = Some(Window {
         mode: bevy::window::WindowMode::Windowed,
         prevent_default_event_handling: false,
-        resolution: WindowResolution::new(1024, 1024),
+        resolution: bevy::window::WindowResolution::new(1024, 1024),
         title,
         #[cfg(feature = "perftest")]
         present_mode: bevy::window::PresentMode::AutoNoVsync,
@@ -482,31 +637,11 @@ fn fps_update_system(
     }
 }
 
-async fn run_app(args: BevyBurnDepthConfig) {
+fn run_app(args: BevyBurnDepthConfig) {
     log("running app...");
     log(&format!("{args:?}"));
 
-    let device = Default::default();
-    init_setup_async::<AutoGraphicsApi>(&device, Default::default()).await;
-    log("device created");
-
-    let config = DepthProConfig::default();
-
-    log("loading depth model...");
-
-    #[cfg(feature = "native")]
-    let depth = io::load_model::<Wgpu>(config.clone(), args.checkpoint.as_path(), &device).await;
-
-    #[cfg(feature = "web")]
-    let depth = io::load_model::<Wgpu>(
-        config.clone(),
-        args.checkpoint.to_string_lossy().as_ref(),
-        &device,
-    )
-    .await;
-
-    let image_size = depth.img_size();
-    log(&format!("depth model ready (inference resolution: {image_size}px)"));
+    let config = DepthAnything3Config::small();
 
     let static_frame = args.image_path.as_ref().map(|path| {
         image::open(path)
@@ -525,13 +660,22 @@ async fn run_app(args: BevyBurnDepthConfig) {
 
     app.insert_resource(depth_texture);
     app.insert_resource(StaticFrame(static_frame.clone()));
-    app.insert_resource(DepthModel {
-        device: device.clone(),
-        model: Arc::new(Mutex::new(depth)),
-    });
-
-    app.add_systems(Startup, setup_ui);
-    app.add_systems(Update, (handle_tasks, process_frames));
+    app.insert_resource(DepthModelState::new(
+        args.checkpoint.clone(),
+        config,
+        args.normalize_relative_depth,
+    ));
+    app.add_systems(
+        Update,
+        (
+            setup_ui,
+            begin_depth_model_load,
+            finish_depth_model_load,
+            handle_tasks,
+            process_frames,
+        )
+            .chain(),
+    );
 
     log("launching Bevy application...");
     app.run();
@@ -542,17 +686,17 @@ async fn run_app(args: BevyBurnDepthConfig) {
     }
 }
 
-pub fn log(message: &str) {
+pub fn log(_message: &str) {
     #[cfg(debug_assertions)]
     #[cfg(target_arch = "wasm32")]
     {
-        web_sys::console::log_1(&message.into());
+        web_sys::console::log_1(&_message.into());
     }
 
     #[cfg(debug_assertions)]
     #[cfg(not(target_arch = "wasm32"))]
     {
-        println!("{message}");
+        println!("{_message}");
     }
 }
 
@@ -563,7 +707,7 @@ fn main() {
         if args.image_path.is_none() {
             std::thread::spawn(bevy_burn_depth::platform::camera::native_camera_thread);
         }
-        futures::executor::block_on(run_app(args));
+        run_app(args);
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -573,6 +717,6 @@ fn main() {
         #[cfg(debug_assertions)]
         console_error_panic_hook::set_once();
 
-        wasm_bindgen_futures::spawn_local(run_app(args));
+        run_app(args);
     }
 }

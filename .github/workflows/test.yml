@@ -34,4 +34,4 @@ jobs:
         enable-sccache: "false"
 
     - name: test (default)
-      run: cargo test --no-default-features --features backend_ndarray
+      run: cargo test --no-default-features --features=backend_ndarray

@@ -1,18 +1,81 @@
 #![recursion_limit = "256"]
 
-use std::{convert::TryInto, f32::consts::PI, path::Path};
+use std::{
+    convert::TryInto,
+    f32::consts::PI,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use burn::{
     nn::interpolate::{Interpolate2dConfig, InterpolateMode},
     prelude::*,
+    record::{HalfPrecisionSettings, NamedMpkFileRecorder},
 };
 use burn_depth::{
     InferenceBackend,
     inference::rgb_to_input_tensor,
-    model::depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
+    model::{
+        depth_anything3::{DepthAnything3, DepthAnything3Config, with_model_load_stack},
+        depth_pro::{DepthPro, HeadDebug, layers::encoder::EncoderDebug},
+        prepare_depth_anything3_image,
+    },
 };
+use clap::{Parser, ValueEnum};
 use image::GenericImageView;
 use safetensors::tensor::{SafeTensors, TensorView};
+
+#[derive(Parser, Debug)]
+#[command(
+    author,
+    version,
+    about = "Compare Burn inference against PyTorch references for DepthPro or Depth Anything 3."
+)]
+struct Args {
+    #[arg(long, value_enum, default_value_t = ModelArg::DepthPro)]
+    model: ModelArg,
+    #[arg(long, value_name = "PATH")]
+    checkpoint: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    reference: Option<PathBuf>,
+    #[arg(long, value_name = "PATH")]
+    image: Option<PathBuf>,
+    #[arg(long, default_value_t = false)]
+    dump_input: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ModelArg {
+    DepthPro,
+    DepthAnything3,
+}
+
+impl ModelArg {
+    fn default_checkpoint(self) -> &'static str {
+        match self {
+            ModelArg::DepthPro => "assets/model/depth_pro.mpk",
+            ModelArg::DepthAnything3 => "assets/model/da3_metric_large.mpk",
+        }
+    }
+
+    fn default_reference(self) -> &'static str {
+        match self {
+            ModelArg::DepthPro => "assets/image/test.safetensors",
+            ModelArg::DepthAnything3 => "assets/image/test_da3_reference.safetensors",
+        }
+    }
+
+    fn default_image(self) -> &'static str {
+        "assets/image/test.jpg"
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            ModelArg::DepthPro => "DepthPro",
+            ModelArg::DepthAnything3 => "Depth Anything 3",
+        }
+    }
+}
 
 #[derive(Clone)]
 struct FeatureTensor {
@@ -65,7 +128,7 @@ struct BurnOutputs {
     fovx: f32,
     fovy: f32,
     encoder_features: Vec<FeatureTensor>,
-    decoder_fusions: Vec<FeatureTensor>,
+    // decoder_fusions: Vec<FeatureTensor>,
     encoder_merge_latent0: FeatureTensor,
     encoder_merge_latent1: FeatureTensor,
     encoder_latent0_tokens: FeatureTensor,
@@ -76,8 +139,8 @@ struct BurnOutputs {
     encoder_merge_x1: FeatureTensor,
     encoder_merge_x2: FeatureTensor,
     canonical_inverse_depth: FeatureTensor,
-    decoder_feature: FeatureTensor,
-    decoder_lowres_feature: FeatureTensor,
+    // decoder_feature: FeatureTensor,
+    // decoder_lowres_feature: FeatureTensor,
     head_conv0: FeatureTensor,
     head_deconv: FeatureTensor,
     head_conv1: FeatureTensor,
@@ -221,11 +284,21 @@ fn feature_tensor_to_tensor(
     )
 }
 
-fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::error::Error>> {
+fn compute_burn_outputs(
+    image_path: &Path,
+    checkpoint_path: &Path,
+) -> Result<BurnOutputs, Box<dyn std::error::Error>> {
     let device = <InferenceBackend as Backend>::Device::default();
-    let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
-    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint)
+    if !checkpoint_path.exists() {
+        return Err(format!(
+            "Burn checkpoint `{}` missing. Run the importer first.",
+            checkpoint_path.display()
+        )
+        .into());
+    }
+
+    let model = DepthPro::<InferenceBackend>::load(&device, checkpoint_path)
         .map_err(|err| format!("failed to load checkpoint: {err}"))?;
 
     let image = image::open(image_path)?;
@@ -302,7 +375,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
     let (
         _canonical_decoder,
         decoder_feature_tensor,
-        decoder_lowres_tensor,
+        _decoder_lowres_tensor,
         decoder_fusion_tensors,
         _,
     ) = model.forward_with_decoder(feature_input.clone());
@@ -337,10 +410,10 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
         shape: canonical_shape,
     };
 
-    let decoder_feature = tensor_to_feature(decoder_feature_tensor)
-        .map_err(|err| format!("failed to fetch decoder feature: {err}"))?;
-    let decoder_lowres_feature = tensor_to_feature(decoder_lowres_tensor)
-        .map_err(|err| format!("failed to fetch decoder lowres feature: {err}"))?;
+    // let decoder_feature = tensor_to_feature(decoder_feature_tensor)
+    //     .map_err(|err| format!("failed to fetch decoder feature: {err}"))?;
+    // let decoder_lowres_feature = tensor_to_feature(decoder_lowres_tensor)
+    //     .map_err(|err| format!("failed to fetch decoder lowres feature: {err}"))?;
     let mut decoder_fusions = Vec::with_capacity(decoder_fusion_tensors.len());
     for (idx, fusion) in decoder_fusion_tensors.into_iter().enumerate() {
         decoder_fusions.push(
@@ -391,7 +464,7 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
         fovx,
         fovy,
         encoder_features: burn_features,
-        decoder_fusions,
+        // decoder_fusions,
         encoder_merge_latent0,
         encoder_merge_latent1,
         encoder_latent0_tokens,
@@ -402,8 +475,8 @@ fn compute_burn_outputs(image_path: &Path) -> Result<BurnOutputs, Box<dyn std::e
         encoder_merge_x1,
         encoder_merge_x2,
         canonical_inverse_depth: canonical_feature,
-        decoder_feature,
-        decoder_lowres_feature,
+        // decoder_feature,
+        // decoder_lowres_feature,
         head_conv0,
         head_deconv,
         head_conv1,
@@ -433,6 +506,25 @@ fn compute_stats(burn: &[f32], reference: &[f32]) -> (f32, f32, f32) {
 
     let mean_abs = sum_abs / burn.len() as f32;
     (mean_abs, max_abs, max_rel)
+}
+
+fn compare_feature(name: &str, burn: &FeatureTensor, reference: &Option<FeatureTensor>) {
+    match reference {
+        Some(torch_feature) => {
+            if torch_feature.shape != burn.shape {
+                println!(
+                    "{name}: shape mismatch torch={:?} burn={:?}",
+                    torch_feature.shape, burn.shape
+                );
+                return;
+            }
+
+            let (mean_abs, max_abs, max_rel) =
+                compute_stats(burn.data.as_slice(), torch_feature.data.as_slice());
+            println!("{name}: mean abs={mean_abs:.6}, max abs={max_abs:.6}, max rel={max_rel:.6}");
+        }
+        None => println!("{name}: torch reference missing; skipping comparison"),
+    }
 }
 
 fn compare_decoder_with_reference(
@@ -571,11 +663,45 @@ fn compare_decoder_with_reference(
 
     Ok(())
 }
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let image_path = Path::new("assets/image/test.jpg");
-    let reference_path = Path::new("assets/image/test.safetensors");
+    let args = Args::parse();
+    let model = args.model;
+    let image = args
+        .image
+        .unwrap_or_else(|| PathBuf::from(model.default_image()));
+    let reference = args
+        .reference
+        .unwrap_or_else(|| PathBuf::from(model.default_reference()));
+    let checkpoint = args
+        .checkpoint
+        .unwrap_or_else(|| PathBuf::from(model.default_checkpoint()));
 
+    println!(
+        "{} correctness: image={}, checkpoint={}, reference={}",
+        model.label(),
+        image.display(),
+        checkpoint.display(),
+        reference.display()
+    );
+
+    match model {
+        ModelArg::DepthPro => {
+            run_depth_pro(image.as_path(), reference.as_path(), checkpoint.as_path())
+        }
+        ModelArg::DepthAnything3 => run_da3(
+            image.as_path(),
+            reference.as_path(),
+            checkpoint.as_path(),
+            args.dump_input,
+        ),
+    }
+}
+
+fn run_depth_pro(
+    image_path: &Path,
+    reference_path: &Path,
+    checkpoint_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !reference_path.exists() {
         return Err(format!(
             "Torch reference `{}` missing. Run `python tool/correctness.py` first.",
@@ -586,7 +712,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let torch_reference = load_torch_reference(reference_path)?;
     compare_decoder_with_reference(&torch_reference)?;
-    let burn_outputs = compute_burn_outputs(image_path)?;
+    let burn_outputs = compute_burn_outputs(image_path, checkpoint_path)?;
 
     if burn_outputs.height != torch_reference.depth_shape[0]
         || burn_outputs.width != torch_reference.depth_shape[1]
@@ -646,240 +772,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 max_diff = max_diff.max(diff);
             }
             let mean_diff = diff_sum / burn_outputs.canonical_inverse_depth.data.len() as f32;
-            let (canon_mean_abs, canon_max_abs, canon_max_rel) = compute_stats(
-                &burn_outputs.canonical_inverse_depth.data,
-                &canonical_ref.data,
-            );
-            println!(
-                "Canonical inverse depth diff: mean abs={canon_mean_abs:.6}, max abs={canon_max_abs:.6}, max rel={canon_max_rel:.6}"
-            );
             println!("Canonical inverse depth mean diff: {mean_diff:.6}");
-            println!("Canonical inverse depth diff range: min={min_diff:.6}, max={max_diff:.6}");
+            println!("Canonical inverse depth diff range: ({min_diff:.6}, {max_diff:.6})");
         }
     } else {
         println!("Torch reference missing canonical inverse depth; skipping comparison.");
     }
-
-    if let Some(decoder_ref) = torch_reference.decoder_feature.as_ref() {
-        if burn_outputs.decoder_feature.shape != decoder_ref.shape {
-            println!(
-                "Decoder feature shape mismatch: torch {:?}, burn {:?}",
-                decoder_ref.shape, burn_outputs.decoder_feature.shape
-            );
-        } else {
-            let mut diff_sum = 0.0f32;
-            let mut min_diff = f32::INFINITY;
-            let mut max_diff = f32::NEG_INFINITY;
-            let mut max_abs_seen = 0.0f32;
-            let mut max_index = 0usize;
-            let mut max_pair = (0.0f32, 0.0f32);
-            for (idx, (&burn_value, &torch_value)) in burn_outputs
-                .decoder_feature
-                .data
-                .iter()
-                .zip(decoder_ref.data.iter())
-                .enumerate()
-            {
-                let diff = burn_value - torch_value;
-                diff_sum += diff;
-                min_diff = min_diff.min(diff);
-                max_diff = max_diff.max(diff);
-                let abs = diff.abs();
-                if abs > max_abs_seen {
-                    max_abs_seen = abs;
-                    max_index = idx;
-                    max_pair = (burn_value, torch_value);
-                }
-            }
-            let mean_diff = diff_sum / burn_outputs.decoder_feature.data.len() as f32;
-            let (mean_abs, max_abs, max_rel) =
-                compute_stats(&burn_outputs.decoder_feature.data, &decoder_ref.data);
-            println!(
-                "Decoder feature diff: mean abs={mean_abs:.6}, max abs={max_abs:.6}, max rel={max_rel:.6}"
-            );
-            println!(
-                "Decoder feature mean diff={mean_diff:.6}, range=({min_diff:.6}, {max_diff:.6})"
-            );
-            if max_abs > 1e-3 {
-                let coords =
-                    flat_index_to_coords(max_index, burn_outputs.decoder_feature.shape.as_slice());
-                println!(
-                    "Decoder feature max diff at {:?}: burn={:.6}, torch={:.6}, diff={:.6}",
-                    coords, max_pair.0, max_pair.1, max_abs
-                );
-            }
-        }
-    } else {
-        println!("Torch reference missing decoder feature; skipping comparison.");
-    }
-
-    if let Some(decoder_lowres_ref) = torch_reference.decoder_lowres_feature.as_ref() {
-        if burn_outputs.decoder_lowres_feature.shape != decoder_lowres_ref.shape {
-            println!(
-                "Decoder lowres feature shape mismatch: torch {:?}, burn {:?}",
-                decoder_lowres_ref.shape, burn_outputs.decoder_lowres_feature.shape
-            );
-        } else {
-            let mut diff_sum = 0.0f32;
-            let mut min_diff = f32::INFINITY;
-            let mut max_diff = f32::NEG_INFINITY;
-            let mut max_abs_seen = 0.0f32;
-            let mut max_index = 0usize;
-            let mut max_pair = (0.0f32, 0.0f32);
-            for (idx, (&burn_value, &torch_value)) in burn_outputs
-                .decoder_lowres_feature
-                .data
-                .iter()
-                .zip(decoder_lowres_ref.data.iter())
-                .enumerate()
-            {
-                let diff = burn_value - torch_value;
-                diff_sum += diff;
-                min_diff = min_diff.min(diff);
-                max_diff = max_diff.max(diff);
-                let abs = diff.abs();
-                if abs > max_abs_seen {
-                    max_abs_seen = abs;
-                    max_index = idx;
-                    max_pair = (burn_value, torch_value);
-                }
-            }
-            let mean_diff = diff_sum / burn_outputs.decoder_lowres_feature.data.len() as f32;
-            let (mean_abs, max_abs, max_rel) = compute_stats(
-                &burn_outputs.decoder_lowres_feature.data,
-                &decoder_lowres_ref.data,
-            );
-            println!(
-                "Decoder lowres feature diff: mean abs={mean_abs:.6}, max abs={max_abs:.6}, max rel={max_rel:.6}"
-            );
-            println!(
-                "Decoder lowres feature mean diff={mean_diff:.6}, range=({min_diff:.6}, {max_diff:.6})"
-            );
-            if max_abs > 1e-3 {
-                let coords = flat_index_to_coords(
-                    max_index,
-                    burn_outputs.decoder_lowres_feature.shape.as_slice(),
-                );
-                println!(
-                    "Decoder lowres max diff at {:?}: burn={:.6}, torch={:.6}, diff={:.6}",
-                    coords, max_pair.0, max_pair.1, max_abs
-                );
-            }
-        }
-    } else {
-        println!("Torch reference missing decoder lowres feature; skipping comparison.");
-    }
-
-    if burn_outputs.decoder_fusions.len() == torch_reference.decoder_fusions.len() {
-        for (idx, (burn_fusion, torch_fusion)) in burn_outputs
-            .decoder_fusions
-            .iter()
-            .zip(torch_reference.decoder_fusions.iter())
-            .enumerate()
-        {
-            if burn_fusion.shape != torch_fusion.shape {
-                println!(
-                    "Decoder fusion {idx} shape mismatch: torch {:?}, burn {:?}",
-                    torch_fusion.shape, burn_fusion.shape
-                );
-                continue;
-            }
-
-            let mut diff_sum = 0.0f32;
-            let mut min_diff = f32::INFINITY;
-            let mut max_diff = f32::NEG_INFINITY;
-            let mut max_abs_seen = 0.0f32;
-            let mut max_index = 0usize;
-            let mut max_pair = (0.0f32, 0.0f32);
-            for (flat_index, (&burn_value, &torch_value)) in burn_fusion
-                .data
-                .iter()
-                .zip(torch_fusion.data.iter())
-                .enumerate()
-            {
-                let diff = burn_value - torch_value;
-                diff_sum += diff;
-                min_diff = min_diff.min(diff);
-                max_diff = max_diff.max(diff);
-                let abs = diff.abs();
-                if abs > max_abs_seen {
-                    max_abs_seen = abs;
-                    max_index = flat_index;
-                    max_pair = (burn_value, torch_value);
-                }
-            }
-            let mean_diff = diff_sum / burn_fusion.data.len() as f32;
-            let (mean_abs, max_abs, max_rel) =
-                compute_stats(burn_fusion.data.as_slice(), torch_fusion.data.as_slice());
-            println!(
-                "Decoder fusion {idx}: mean abs={mean_abs:.6}, max abs={max_abs:.6}, max rel={max_rel:.6}"
-            );
-            println!(
-                "Decoder fusion {idx}: mean diff={mean_diff:.6}, range=({min_diff:.6}, {max_diff:.6})"
-            );
-            if max_abs > 1e-3 {
-                let coords = flat_index_to_coords(max_index, burn_fusion.shape.as_slice());
-                println!(
-                    "Decoder fusion {idx} max diff at {:?}: burn={:.6}, torch={:.6}, diff={:.6}",
-                    coords, max_pair.0, max_pair.1, max_abs
-                );
-            }
-        }
-    } else {
-        println!(
-            "Skipping decoder fusion comparison (torch={}, burn={}).",
-            torch_reference.decoder_fusions.len(),
-            burn_outputs.decoder_fusions.len()
-        );
-    }
-
-    let compare_feature = |name: &str, burn: &FeatureTensor, torch_opt: &Option<FeatureTensor>| {
-        if let Some(torch_feat) = torch_opt.as_ref() {
-            if burn.shape != torch_feat.shape {
-                println!(
-                    "{name} shape mismatch: torch {:?}, burn {:?}",
-                    torch_feat.shape, burn.shape
-                );
-            } else {
-                let mut diff_sum = 0.0f32;
-                let mut min_diff = f32::INFINITY;
-                let mut max_diff = f32::NEG_INFINITY;
-                let mut max_abs_seen = 0.0f32;
-                let mut max_index = 0usize;
-                let mut max_pair = (0.0f32, 0.0f32);
-                for (idx, (&burn_value, &torch_value)) in
-                    burn.data.iter().zip(torch_feat.data.iter()).enumerate()
-                {
-                    let diff = burn_value - torch_value;
-                    diff_sum += diff;
-                    min_diff = min_diff.min(diff);
-                    max_diff = max_diff.max(diff);
-                    let abs = diff.abs();
-                    if abs > max_abs_seen {
-                        max_abs_seen = abs;
-                        max_index = idx;
-                        max_pair = (burn_value, torch_value);
-                    }
-                }
-                let mean_diff = diff_sum / burn.data.len() as f32;
-                let (mean_abs, max_abs, max_rel) =
-                    compute_stats(burn.data.as_slice(), torch_feat.data.as_slice());
-                println!(
-                    "{name}: mean abs={mean_abs:.6}, max abs={max_abs:.6}, max rel={max_rel:.6}"
-                );
-                println!("{name}: mean diff={mean_diff:.6}, range=({min_diff:.6}, {max_diff:.6})");
-                if max_abs > 1e-3 {
-                    let coords = flat_index_to_coords(max_index, burn.shape.as_slice());
-                    println!(
-                        "{name}: max abs diff at {:?}: burn={:.6}, torch={:.6}, diff={:.6}",
-                        coords, max_pair.0, max_pair.1, max_abs
-                    );
-                }
-            }
-        } else {
-            println!("Torch reference missing {name}; skipping comparison.");
-        }
-    };
 
     compare_feature(
         "Encoder latent0 tokens",
@@ -1003,5 +901,219 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     } else {
         Err("Burn output deviates from Torch reference beyond tolerance.".into())
+    }
+}
+
+struct Da3Reference {
+    depth: Vec<f32>,
+    height: usize,
+    width: usize,
+}
+
+struct Da3Outputs {
+    depth: Vec<f32>,
+    height: usize,
+    width: usize,
+}
+
+fn run_da3(
+    image_path: &Path,
+    reference_path: &Path,
+    checkpoint_path: &Path,
+    dump_input: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !reference_path.exists() {
+        return Err(format!(
+            "DA3 reference `{}` missing. Run `python tool/correctness_da3.py` first.",
+            reference_path.display()
+        )
+        .into());
+    }
+
+    let reference = load_da3_reference(reference_path)?;
+    let outputs = compute_da3_outputs(image_path, checkpoint_path, dump_input)?;
+    compare_da3(&reference, &outputs)
+}
+
+fn load_da3_reference(path: &Path) -> Result<Da3Reference, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let tensors = SafeTensors::deserialize(&bytes)?;
+    let depth_view = tensors.tensor("metric_depth")?;
+    let mut shape = depth_view.shape().to_vec();
+    if shape.len() == 2 {
+        shape.push(1);
+    }
+    if shape.len() != 3 {
+        return Err(format!(
+            "DA3 reference `metric_depth` must be rank 3, got shape {:?}",
+            depth_view.shape()
+        )
+        .into());
+    }
+    let height = shape[0];
+    let width = shape[1];
+    let data = tensor_view_to_vec(&depth_view);
+    Ok(Da3Reference {
+        depth: data,
+        height,
+        width,
+    })
+}
+
+fn compute_da3_outputs(
+    image_path: &Path,
+    checkpoint_path: &Path,
+    dump_input: bool,
+) -> Result<Da3Outputs, Box<dyn std::error::Error>> {
+    let device = <InferenceBackend as Backend>::Device::default();
+    if !checkpoint_path.exists() {
+        return Err(format!(
+            "DA3 Burn checkpoint `{}` missing. Run the importer first.",
+            checkpoint_path.display()
+        )
+        .into());
+    }
+
+    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
+    let model = with_model_load_stack(|| {
+        DepthAnything3::<InferenceBackend>::new(&device, DepthAnything3Config::metric_large())
+            .load_file(checkpoint_path, &recorder, &device)
+    })
+    .map_err(|err| format!("Failed to load DA3 checkpoint: {err}"))?;
+    let target = model.img_size();
+
+    let base_rgb = image::open(image_path)
+        .map_err(|err| format!("Failed to open image `{}`: {err}", image_path.display()))?
+        .to_rgb8();
+    let prepared = prepare_depth_anything3_image(&base_rgb, target)
+        .map_err(|err| format!("Failed to prepare DA3 input: {err}"))?;
+    let resized = prepared.rgb;
+    if std::env::var("DA3_DUMP_RESIZED").is_ok() {
+        let dump_path = Path::new("target/da3_resized_burn.rgb");
+        if let Some(parent) = dump_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(dump_path, resized.as_raw())?;
+        println!(
+            "Wrote Burn-resized RGB bytes to {} (set DA3_DUMP_RESIZED= to disable).",
+            dump_path.display()
+        );
+    }
+    let tensor =
+        rgb_to_input_tensor::<InferenceBackend>(resized.as_raw(), target, target, &device)?;
+    if dump_input {
+        let dump_path = Path::new("target/da3_input_tensor.bin");
+        if let Some(parent) = dump_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tensor_data = tensor.clone().into_data().convert::<f32>();
+        let shape = tensor_data.shape.as_slice();
+        let values = tensor_data
+            .to_vec::<f32>()
+            .map_err(|err| format!("Failed to read input tensor: {err:?}"))?;
+        let mut file = std::fs::File::create(dump_path)?;
+        for &dim in shape {
+            let dim_u32 = u32::try_from(dim)
+                .map_err(|_| format!("Input tensor dimension {dim} exceeds u32 range"))?;
+            file.write_all(&dim_u32.to_le_bytes())?;
+        }
+        for value in values {
+            file.write_all(&value.to_le_bytes())?;
+        }
+        println!("Dumped DA3 input tensor to {}", dump_path.display());
+    }
+    let prediction = model.infer(tensor);
+    let depth_data = prediction.depth.into_data().convert::<f32>();
+    let shape = depth_data.shape.as_slice().to_vec();
+    let values = depth_data
+        .to_vec::<f32>()
+        .map_err(|err| format!("Failed to read DA3 depth tensor: {err:?}"))?;
+
+    Ok(Da3Outputs {
+        depth: values,
+        height: shape[1],
+        width: shape[2],
+    })
+}
+
+fn compare_da3(
+    reference: &Da3Reference,
+    outputs: &Da3Outputs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if reference.height != outputs.height || reference.width != outputs.width {
+        return Err(format!(
+            "shape mismatch: torch {}x{}, burn {}x{}",
+            reference.height, reference.width, outputs.height, outputs.width
+        )
+        .into());
+    }
+
+    let mut sum_abs = 0.0f32;
+    let mut sum_signed = 0.0f32;
+    let mut max_abs = 0.0f32;
+    let mut max_rel = 0.0f32;
+    let mut dot = 0.0f32;
+    let mut ref_norm = 0.0f32;
+    let mut max_index = 0usize;
+    let mut max_pair = (0.0f32, 0.0f32);
+    for (idx, (&burn, &torch)) in outputs.depth.iter().zip(reference.depth.iter()).enumerate() {
+        let diff = (burn - torch).abs();
+        sum_abs += diff;
+        sum_signed += burn - torch;
+        if diff > max_abs {
+            max_abs = diff;
+            max_index = idx;
+            max_pair = (burn, torch);
+        }
+        if torch.abs() > 1e-6 {
+            max_rel = max_rel.max(diff / torch.abs());
+        }
+        dot += burn * torch;
+        ref_norm += torch * torch;
+    }
+    let ls_scale = if ref_norm > 0.0 { dot / ref_norm } else { 1.0 };
+    let mean_abs = sum_abs / outputs.depth.len() as f32;
+    let mean_signed = sum_signed / outputs.depth.len() as f32;
+    println!("DA3 mean abs diff: {mean_abs:.6}");
+    println!("DA3 mean signed diff (burn - torch): {mean_signed:.6}");
+    println!("DA3 max abs diff:  {max_abs:.6}");
+    println!("DA3 max rel diff:  {max_rel:.6}");
+    let coords = (max_index / reference.width, max_index % reference.width);
+    println!(
+        "DA3 worst pixel at (row={}, col={}): burn={:.6}, torch={:.6}, diff={:.6}",
+        coords.0, coords.1, max_pair.0, max_pair.1, max_abs
+    );
+    println!("DA3 LS scale (burn ≈ scale * torch): {ls_scale:.6}");
+    if reference.width > 32 && reference.height > 32 {
+        let border = 16;
+        let mut center_sum = 0.0f32;
+        let mut center_max = 0.0f32;
+        let mut center_count = 0usize;
+        for row in border..reference.height - border {
+            for col in border..reference.width - border {
+                let idx = row * reference.width + col;
+                let diff = (outputs.depth[idx] - reference.depth[idx]).abs();
+                center_sum += diff;
+                center_max = center_max.max(diff);
+                center_count += 1;
+            }
+        }
+        if center_count > 0 {
+            let center_mean = center_sum / center_count as f32;
+            println!(
+                "DA3 center region mean abs diff: {center_mean:.6}, max abs diff: {center_max:.6}"
+            );
+        }
+    }
+
+    const DA3_MAX_ABS: f32 = 5e-3;
+    const DA3_MEAN_ABS: f32 = 1e-3;
+    const DA3_MAX_REL: f32 = 1e-2;
+
+    if mean_abs <= DA3_MEAN_ABS && max_abs <= DA3_MAX_ABS && max_rel <= DA3_MAX_REL {
+        println!("Depth Anything 3 output matches PyTorch reference within tolerance.");
+        Ok(())
+    } else {
+        Err("Depth Anything 3 output deviates beyond tolerance.".into())
     }
 }

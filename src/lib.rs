@@ -3,23 +3,23 @@
 pub mod inference;
 pub mod model;
 
-#[cfg(feature = "backend_cpu")]
-use burn::backend::Cpu;
+#[cfg(feature = "backend_ndarray")]
+use burn::backend::NdArray;
 
 #[cfg(feature = "backend_cuda")]
 use burn::backend::Cuda;
 
-#[cfg(feature = "backend_ndarray")]
-use burn::backend::NdArray;
-
 #[cfg(feature = "backend_cpu")]
-pub type InferenceBackend = Cpu;
+use burn::backend::Cpu;
+
+#[cfg(feature = "backend_ndarray")]
+pub type InferenceBackend = NdArray;
 
 #[cfg(feature = "backend_cuda")]
 pub type InferenceBackend = Cuda;
 
-#[cfg(feature = "backend_ndarray")]
-pub type InferenceBackend = NdArray;
+#[cfg(feature = "backend_cpu")]
+pub type InferenceBackend = Cpu;
 
 #[cfg(test)]
 mod tests {
@@ -32,10 +32,7 @@ mod tests {
     use burn::backend::NdArray as NdArrayBackend;
 
     #[cfg(feature = "backend_wgpu")]
-    use burn::backend::{
-        Wgpu,
-        wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup},
-    };
+    use burn::backend::wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup};
 
     use burn::prelude::*;
     use std::any::type_name;
@@ -50,9 +47,9 @@ mod tests {
     use half::f16;
 
     #[cfg(feature = "backend_wgpu")]
-    type WgpuHalfBackend = Wgpu<f16>;
+    type WgpuHalfBackend = burn::backend::Wgpu<f16>;
     #[cfg(feature = "backend_wgpu")]
-    type WgpuF32Backend = Wgpu<f32>;
+    type WgpuF32Backend = burn::backend::Wgpu<f32>;
 
     #[cfg(feature = "backend_wgpu")]
     static WGPU_FEATURES: OnceLock<Result<Features, String>> = OnceLock::new();
