@@ -292,12 +292,26 @@ impl<B: Backend> DepthProEncoder<B> {
         let batch = dims[0];
         let tokens = dims[1];
         let dim = dims[2];
-
-        let embeddings = if cls_token_offset > 0 {
-            embeddings.slice([0..batch, cls_token_offset..tokens, 0..dim])
+        let spatial_tokens = width * height;
+        assert!(
+            spatial_tokens <= tokens,
+            "cannot reshape {tokens} tokens into {width}x{height}"
+        );
+        let has_room_for_offset = tokens
+            .checked_sub(cls_token_offset)
+            .map(|remaining| remaining >= spatial_tokens)
+            .unwrap_or(false);
+        let offset = if has_room_for_offset {
+            cls_token_offset
         } else {
-            embeddings
+            tokens - spatial_tokens
         };
+
+        let embeddings = embeddings.slice([
+            0..batch,
+            offset..offset + spatial_tokens,
+            0..dim,
+        ]);
 
         embeddings
             .reshape([batch as i32, height as i32, width as i32, dim as i32])
