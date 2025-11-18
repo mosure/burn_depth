@@ -26,15 +26,21 @@ exclude = [
   "credits",
 ]
 
+[workspace]
+members = [
+  "crates/bevy_burn_depth",
+]
+resolver = "2"
+
 
 [features]
 default = [
-  # "backend_fusion",
+  "backend_fusion",
   # "backend_cpu",
 
-  # "backend_cuda",
+  "backend_cuda",
 
-  "backend_ndarray",
+  # "backend_ndarray",
 ]
 
 import = [
@@ -48,15 +54,16 @@ import = [
 ]
 
 # note: one-hot requirement
-backend_cpu = ["burn/cpu"]
-backend_cuda =["burn/cuda"]
+backend_cpu = ["burn/cpu", "burn_dino/backend_cpu"]
+backend_cuda = ["burn/cuda", "burn_dino/backend_cuda"]
 backend_fusion = ["burn/fusion"]
-backend_ndarray = ["burn/ndarray"]
-backend_wgpu = ["burn/wgpu", "half"]
+backend_ndarray = ["burn/ndarray", "burn_dino/backend_ndarray"]
+backend_wgpu = ["burn/wgpu", "burn_dino/backend_wgpu", "half"]
 
 
 [dependencies]
 burn = "0.19"
+burn_dino = { version = "0.5.2", default-features = false }
 
 half = { version = "2", optional = true }
 

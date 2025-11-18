@@ -33,7 +33,7 @@ mod tests {
 
     #[cfg(feature = "backend_wgpu")]
     use burn::backend::{
-        Wgpu as WgpuBackend,
+        Wgpu,
         wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup},
     };
 

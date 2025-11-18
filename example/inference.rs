@@ -30,9 +30,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let width = orig_width as usize;
     let height = orig_height as usize;
 
-    let result =
-        infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device)
-            .map_err(|err| format!("Failed to run inference: {err}"))?;
+    let result = infer_from_rgb::<InferenceBackend>(&model, rgb.as_raw(), width, height, &device)
+        .map_err(|err| format!("Failed to run inference: {err}"))?;
 
     let depth_data = result.depth.clone().into_data().convert::<f32>();
     let shape = depth_data.shape.clone();
@@ -94,7 +93,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let focal_values = focal_data
         .to_vec::<f32>()
         .map_err(|err| format!("Failed to read focal length tensor: {err:?}"))?;
-    let fovy_values = result.fovy_rad
+    let fovy_values = result
+        .fovy_rad
         .clone()
         .into_data()
         .convert::<f32>()

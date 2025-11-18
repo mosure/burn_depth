@@ -144,14 +144,8 @@ pub struct HeadDebug<B: Backend> {
 impl<B: Backend> DepthPro<B> {
     pub fn new(device: &B::Device, config: DepthProConfig) -> Self {
         let (patch_encoder, patch_config) = create_vit(device, &config.patch_encoder_preset);
-        let (image_encoder, _) = create_vit(device, &config.image_encoder_preset);
+        let (image_encoder, image_config) = create_vit(device, &config.image_encoder_preset);
         let interpolation = config.interpolation;
-
-        let fov_encoder = config
-            .fov_encoder_preset
-            .as_ref()
-            .filter(|_| config.use_fov_head)
-            .map(|preset| create_vit(device, preset).0);
 
         let encoder = DepthProEncoder::new(
             device,
@@ -159,6 +153,7 @@ impl<B: Backend> DepthPro<B> {
             patch_encoder,
             &patch_config,
             image_encoder,
+            image_config.embed_dim,
             patch_config.encoder_feature_layer_ids.clone(),
             config.decoder_features,
             interpolation,
@@ -171,9 +166,20 @@ impl<B: Backend> DepthPro<B> {
 
         let head = DepthHead::new(device, config.decoder_features, (32, 1));
 
-        let fov = config
-            .use_fov_head
-            .then(|| FOVNetwork::new(device, config.decoder_features, fov_encoder, interpolation));
+        let fov = if config.use_fov_head {
+            let fov_encoder = config.fov_encoder_preset.as_ref().map(|preset| {
+                let (encoder, vit_config) = create_vit(device, preset);
+                (encoder, vit_config.embed_dim)
+            });
+            Some(FOVNetwork::new(
+                device,
+                config.decoder_features,
+                fov_encoder,
+                interpolation,
+            ))
+        } else {
+            None
+        };
 
         Self {
             encoder,
@@ -358,7 +364,6 @@ impl<B: Backend> DepthPro<B> {
     }
 }
 
-
 /// fovy = 2 * atan( (H/W) * tan(fovx/2) )
 /// uses raján atan approx on [0,1] with range reduction for |x|>1.
 /// input: fovx_rad (radians), output: fovy_rad (radians).
@@ -367,7 +372,7 @@ pub fn fovy_from_fovx_rad<B: Backend, const D: usize>(
     h: usize,
     w: usize,
 ) -> Tensor<B, D> {
-    let k = 0.273;  // raján constant
+    let k = 0.273; // raján constant
     let pi_over_4 = core::f64::consts::FRAC_PI_4;
     let pi_over_2 = core::f64::consts::FRAC_PI_2;
 
@@ -380,24 +385,33 @@ pub fn fovy_from_fovx_rad<B: Backend, const D: usize>(
     // atan(t): range reduction + raján on [0,1]
     let s = t.clone().sign();
     let ax = t.abs();
-    let use_inv = ax.clone().greater_elem(1.0).float();         // 1 where |x|>1 else 0
+    let use_inv = ax.clone().greater_elem(1.0).float(); // 1 where |x|>1 else 0
     let inv = ax.clone().recip();
-    let xr = ax.mul(use_inv.clone().neg().add_scalar(1.0)) // (1-use_inv)*ax
-        .add(inv.mul(use_inv.clone()));             // + use_inv*(1/ax)
+    let xr = ax
+        .mul(use_inv.clone().neg().add_scalar(1.0)) // (1-use_inv)*ax
+        .add(inv.mul(use_inv.clone())); // + use_inv*(1/ax)
 
     // atan(xr) ≈ xr * (π/4 + k*(1 - xr)), xr∈[0,1]
-    let inner = xr.clone().neg().add_scalar(1.0).mul_scalar(k).add_scalar(pi_over_4);
+    let inner = xr
+        .clone()
+        .neg()
+        .add_scalar(1.0)
+        .mul_scalar(k)
+        .add_scalar(pi_over_4);
     let atan_reduced = xr.mul(inner);
 
     // undo reduction: atan(ax) = atan_reduced + use_inv * (π/2 - 2*atan_reduced)
-    let delta   = atan_reduced.clone().mul_scalar(2.0).neg().add_scalar(pi_over_2);
+    let delta = atan_reduced
+        .clone()
+        .mul_scalar(2.0)
+        .neg()
+        .add_scalar(pi_over_2);
     let atan_ax = atan_reduced.add(delta.mul(use_inv));
 
     // restore sign and finish
     let atan_t = atan_ax.mul(s);
     atan_t.mul_scalar(2.0)
 }
-
 
 pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<B>) {
     let weight = conv.weight.val();
@@ -415,7 +429,6 @@ pub(crate) fn maybe_fix_conv_transpose2d<B: Backend>(conv: &mut ConvTranspose2d<
         conv.weight = Param::from_tensor(permuted);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
