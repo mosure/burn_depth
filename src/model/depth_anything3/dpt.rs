@@ -10,6 +10,7 @@ use burn::{
     tensor::activation::relu,
 };
 use burn_dino::model::dino::DinoIntermediate;
+use std::collections::HashMap;
 
 #[derive(Config, Debug)]
 pub struct DepthAnything3HeadConfig {
@@ -230,6 +231,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         width: usize,
         patch_start_idx: usize,
         patch_size: usize,
+        cache: &mut PosEmbedCache<B>,
     ) -> DualHeadOutput<B> {
         assert!(
             hooks.len() >= 4,
@@ -242,14 +244,23 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         let mut resized = Vec::with_capacity(4);
         for (stage, hook) in hooks.iter().enumerate().take(4) {
             let tokens = hook.patches.clone();
-            resized.push(self.prepare_stage(tokens, stage, ph, pw, patch_start_idx, height, width));
+            resized.push(self.prepare_stage(
+                tokens,
+                stage,
+                ph,
+                pw,
+                patch_start_idx,
+                height,
+                width,
+                cache,
+            ));
         }
 
         let fused_main = self.fuse_main(&resized);
-        let main_logits = self.build_main_logits(fused_main, height, width);
+        let main_logits = self.build_main_logits(fused_main, height, width, cache);
 
         let (aux_logits, aux_stage_necks, aux_head_input) =
-            self.build_aux_logits(&resized, height, width);
+            self.build_aux_logits(&resized, height, width, cache);
 
         let depth = self.select_main_channel(&main_logits, 0);
         let depth_confidence = self.select_conf_channel(&main_logits);
@@ -278,6 +289,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         patch_start_idx: usize,
         height: usize,
         width: usize,
+        workspace: &mut PosEmbedCache<B>,
     ) -> Tensor<B, 4> {
         let dims = tokens.shape().dims::<3>();
         let batch = dims[0];
@@ -299,7 +311,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
 
         let mut projected = projected;
         if self.pos_embed {
-            projected = add_position_embedding(projected, width, height);
+            projected = workspace.add(projected, width, height);
         }
         self.resize_layers[stage].forward(projected)
     }
@@ -322,7 +334,13 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         self.scratch.refinenet1.forward(out, Some(l1), None)
     }
 
-    fn build_main_logits(&self, fused: Tensor<B, 4>, height: usize, width: usize) -> Tensor<B, 4> {
+    fn build_main_logits(
+        &self,
+        fused: Tensor<B, 4>,
+        height: usize,
+        width: usize,
+        workspace: &mut PosEmbedCache<B>,
+    ) -> Tensor<B, 4> {
         let mut fused = self.scratch.output_conv1.forward(fused);
         let target = [
             (height / self.down_ratio.0).max(1),
@@ -330,7 +348,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         ];
         fused = resize_bilinear(fused, target, true);
         if self.pos_embed {
-            fused = add_position_embedding(fused, width, height);
+            fused = workspace.add(fused, width, height);
         }
         self.scratch.output_conv2.forward(fused)
     }
@@ -340,6 +358,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
         features: &[Tensor<B, 4>],
         height: usize,
         width: usize,
+        workspace: &mut PosEmbedCache<B>,
     ) -> (Tensor<B, 4>, Vec<Tensor<B, 4>>, Tensor<B, 4>) {
         let aux1 = self
             .scratch
@@ -407,10 +426,10 @@ impl<B: Backend> DualDepthAnything3Head<B> {
             .cloned()
             .expect("aux levels must not be empty");
         if self.pos_embed {
-            last = add_position_embedding(last, width, height);
+            last = workspace.add(last, width, height);
         }
         let head_input = if self.pos_embed {
-            add_position_embedding(last.clone(), width, height)
+            workspace.add(last.clone(), width, height)
         } else {
             last.clone()
         };
@@ -558,8 +577,10 @@ impl<B: Backend> DepthAnything3Head<B> {
         width: usize,
         patch_start_idx: usize,
         patch_size: usize,
+        cache: &mut PosEmbedCache<B>,
     ) -> Tensor<B, 3> {
-        let activated = self.forward_raw(hooks, height, width, patch_start_idx, patch_size);
+        let activated =
+            self.forward_raw(hooks, height, width, patch_start_idx, patch_size, cache);
         self.select_depth_channel(activated)
     }
 
@@ -570,6 +591,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         width: usize,
         patch_start_idx: usize,
         patch_size: usize,
+        cache: &mut PosEmbedCache<B>,
     ) -> Tensor<B, 4> {
         assert!(
             hooks.len() >= 4,
@@ -582,7 +604,16 @@ impl<B: Backend> DepthAnything3Head<B> {
         let mut resized = Vec::with_capacity(4);
         for (stage, hook) in hooks.iter().enumerate().take(4) {
             let tokens = hook.clone();
-            resized.push(self.prepare_stage(tokens, stage, ph, pw, patch_start_idx, height, width));
+            resized.push(self.prepare_stage(
+                tokens,
+                stage,
+                ph,
+                pw,
+                patch_start_idx,
+                height,
+                width,
+                cache,
+            ));
         }
 
         let fused = self.fuse(resized);
@@ -593,7 +624,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         ];
         let mut fused = resize_bilinear(fused, target, true);
         if self.pos_embed {
-            fused = self.add_pos_embed(fused, width, height);
+            fused = cache.add(fused, width, height);
         }
         let logits = self.scratch.output_conv2.forward(fused);
         self.apply_activation(logits)
@@ -625,6 +656,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         patch_start_idx: usize,
         image_height: usize,
         image_width: usize,
+        workspace: &mut PosEmbedCache<B>,
     ) -> Tensor<B, 4> {
         let dims = tokens.shape().dims::<3>();
         let batch = dims[0];
@@ -652,7 +684,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         let x = ensure_channels(x, self.project_input_dim.0);
         let mut x = self.projects[stage_idx].forward(x);
         if self.pos_embed {
-            x = self.add_pos_embed(x, image_width, image_height);
+            x = workspace.add(x, image_width, image_height);
         }
         self.resize_layers[stage_idx].forward(x)
     }
@@ -734,23 +766,77 @@ impl<B: Backend> DepthAnything3Head<B> {
         let (var, mean) = tokens.clone().var_mean_bias(2);
         tokens.sub(mean).div(var.add_scalar(TOKEN_NORM_EPS).sqrt())
     }
-
-    fn add_pos_embed(
-        &self,
-        tensor: Tensor<B, 4>,
-        image_width: usize,
-        image_height: usize,
-    ) -> Tensor<B, 4> {
-        if !self.pos_embed {
-            return tensor;
-        }
-        add_position_embedding(tensor, image_width, image_height)
-    }
 }
 
 const TOKEN_NORM_EPS: f32 = 1e-5;
 const POS_EMBED_RATIO: f32 = 0.1;
 const POS_EMBED_OMEGA0: f32 = 100.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PosEmbedKey {
+    channels: usize,
+    height: usize,
+    width: usize,
+    image_width: usize,
+    image_height: usize,
+}
+
+#[derive(Debug)]
+pub struct PosEmbedCache<B: Backend> {
+    cache: HashMap<PosEmbedKey, Tensor<B, 4>>,
+}
+
+impl<B: Backend> PosEmbedCache<B> {
+    pub fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    pub fn add(
+        &mut self,
+        tensor: Tensor<B, 4>,
+        image_width: usize,
+        image_height: usize,
+    ) -> Tensor<B, 4> {
+        let dims = tensor.shape().dims::<4>();
+        if dims[1] == 0 || dims[2] == 0 || dims[3] == 0 {
+            return tensor;
+        }
+        let key = PosEmbedKey {
+            channels: dims[1],
+            height: dims[2],
+            width: dims[3],
+            image_width,
+            image_height,
+        };
+
+        let device = tensor.device();
+        let cached = self.cache.entry(key).or_insert_with(|| {
+            let embedding = build_positional_embedding(
+                key.channels,
+                key.height,
+                key.width,
+                key.image_width,
+                key.image_height,
+            );
+            Tensor::<B, 1>::from_floats(embedding.as_slice(), &device)
+                .reshape([1, key.channels as i32, key.height as i32, key.width as i32])
+        });
+        let expanded = cached.clone().expand(tensor.shape());
+        tensor + expanded.mul_scalar(POS_EMBED_RATIO)
+    }
+
+    pub fn entry_count(&self) -> usize {
+        self.cache.len()
+    }
+}
+
+impl<B: Backend> Default for PosEmbedCache<B> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 fn build_positional_embedding(
     channels: usize,
@@ -805,32 +891,6 @@ fn build_positional_embedding(
     }
 
     chw
-}
-
-fn add_position_embedding<B: Backend>(
-    tensor: Tensor<B, 4>,
-    image_width: usize,
-    image_height: usize,
-) -> Tensor<B, 4> {
-    let dims = tensor.shape().dims::<4>();
-    let batch = dims[0];
-    let channels = dims[1];
-    let height = dims[2];
-    let width = dims[3];
-    let embedding = build_positional_embedding(channels, height, width, image_width, image_height);
-    let mut repeated = Vec::with_capacity(embedding.len() * batch);
-    for _ in 0..batch {
-        repeated.extend_from_slice(&embedding);
-    }
-    let device = tensor.device();
-    let embed_tensor = Tensor::<B, 1>::from_floats(repeated.as_slice(), &device).reshape([
-        batch as i32,
-        channels as i32,
-        height as i32,
-        width as i32,
-    ]);
-    let expanded = embed_tensor.expand(tensor.shape());
-    tensor + expanded.mul_scalar(POS_EMBED_RATIO)
 }
 
 fn linspace(start: f32, end: f32, steps: usize) -> Vec<f32> {

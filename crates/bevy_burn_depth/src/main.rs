@@ -26,7 +26,9 @@ use bevy_args::{Deserialize, Parser, Serialize, parse_args};
 use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use bevy_burn_depth::{platform::camera::receive_image, process_frame};
 use burn::prelude::*;
-use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
+use burn_depth::model::depth_anything3::{
+    CachedDepthAnything3, DepthAnything3Config,
+};
 use burn_wgpu::Wgpu;
 use image::RgbImage;
 
@@ -150,7 +152,7 @@ struct DepthModelState {
     checkpoint: PathBuf,
     config: DepthAnything3Config,
     preferred_resolution: Option<usize>,
-    model: Option<Arc<Mutex<DepthAnything3<Wgpu>>>>,
+    model: Option<Arc<Mutex<CachedDepthAnything3<Wgpu>>>>,
     load_task: Option<Task<DepthModelLoadResult>>,
     normalize_relative_depth: bool,
 }
@@ -173,7 +175,7 @@ impl DepthModelState {
 }
 
 struct DepthModelLoadResult {
-    model: DepthAnything3<Wgpu>,
+    model: CachedDepthAnything3<Wgpu>,
     resolution: usize,
 }
 
@@ -361,7 +363,7 @@ fn spawn_depth_model_load_task(
         log("load_model task finished.");
         let resolution = depth.img_size();
         DepthModelLoadResult {
-            model: depth,
+            model: CachedDepthAnything3::new(depth),
             resolution,
         }
     })
@@ -378,7 +380,7 @@ fn spawn_depth_model_load_task(
         let depth = io::load_model::<Wgpu>(config, &checkpoint, &device).await;
         let resolution = depth.img_size();
         DepthModelLoadResult {
-            model: depth,
+            model: CachedDepthAnything3::new(depth),
             resolution,
         }
     })

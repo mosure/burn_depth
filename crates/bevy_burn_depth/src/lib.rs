@@ -3,7 +3,11 @@ use std::sync::{Arc, Mutex};
 use burn::prelude::*;
 use burn_depth::{
     inference::infer_from_rgb,
-    model::{depth_anything3::DepthAnything3, prepare_depth_anything3_image, PreparedModelImage},
+    model::{
+        depth_anything3::CachedDepthAnything3,
+        prepare_depth_anything3_image,
+        PreparedModelImage,
+    },
 };
 use image::{imageops, RgbImage};
 
@@ -11,7 +15,7 @@ pub mod platform;
 
 pub async fn process_frame<B: Backend>(
     frame: RgbImage,
-    model: Arc<Mutex<DepthAnything3<B>>>,
+    model: Arc<Mutex<CachedDepthAnything3<B>>>,
     device: B::Device,
     patch_size: usize,
     preferred_resolution: Option<usize>,

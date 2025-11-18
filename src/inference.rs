@@ -2,7 +2,7 @@ use burn::prelude::*;
 
 use crate::model::{
     AnyDepthModel,
-    depth_anything3::DepthAnything3,
+    depth_anything3::{CachedDepthAnything3, DepthAnything3},
     depth_pro::{DepthPro, DepthProInference},
 };
 
@@ -40,6 +40,17 @@ impl<B: Backend> DepthModel<B> for DepthPro<B> {
 }
 
 impl<B: Backend> DepthModel<B> for DepthAnything3<B> {
+    fn infer_depth(&self, input: Tensor<B, 4>) -> DepthPrediction<B> {
+        let result = self.infer(input);
+        DepthPrediction {
+            depth: result.depth,
+            focallength_px: None,
+            fovy_rad: None,
+        }
+    }
+}
+
+impl<B: Backend> DepthModel<B> for CachedDepthAnything3<B> {
     fn infer_depth(&self, input: Tensor<B, 4>) -> DepthPrediction<B> {
         let result = self.infer(input);
         DepthPrediction {

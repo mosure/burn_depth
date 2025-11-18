@@ -5,6 +5,7 @@ use burn::{
 use burn_dino::model::dino::{
     DinoIntermediate, DinoVisionTransformer, DinoVisionTransformerConfig,
 };
+use std::cell::RefCell;
 
 use camera::{CameraDecoder, CameraEncoder, CameraPrediction};
 mod camera;
@@ -14,7 +15,7 @@ mod interpolate;
 pub use camera::{CameraDecoderConfig, CameraEncoderConfig};
 pub use dpt::{
     DepthAnything3Head, DepthAnything3HeadConfig, DualDepthAnything3Head, DualHeadOutput,
-    HeadActivation,
+    HeadActivation, PosEmbedCache,
 };
 
 mod stack_guard {
@@ -34,6 +35,86 @@ mod stack_guard {
     #[cfg(target_arch = "wasm32")]
     pub fn with_model_load_stack<R>(f: impl FnOnce() -> R) -> R {
         f()
+    }
+}
+
+#[derive(Debug)]
+pub struct CachedDepthAnything3<B: Backend> {
+    model: DepthAnything3<B>,
+    cache: RefCell<PosEmbedCache<B>>,
+}
+
+impl<B: Backend> CachedDepthAnything3<B> {
+    pub fn new(model: DepthAnything3<B>) -> Self {
+        Self {
+            model,
+            cache: RefCell::new(PosEmbedCache::new()),
+        }
+    }
+
+    pub fn inner(&self) -> &DepthAnything3<B> {
+        &self.model
+    }
+
+    pub fn inner_mut(&mut self) -> &mut DepthAnything3<B> {
+        &mut self.model
+    }
+
+    pub fn into_inner(self) -> DepthAnything3<B> {
+        self.model
+    }
+
+    fn with_cache<R>(&self, f: impl FnOnce(&mut PosEmbedCache<B>) -> R) -> R {
+        let mut cache = self.cache.borrow_mut();
+        f(&mut cache)
+    }
+
+    pub fn infer(&self, input: Tensor<B, 4>) -> DepthAnything3Inference<B> {
+        self.with_cache(|cache| self.model.infer_with_cache(input, cache))
+    }
+
+    pub fn infer_with_camera(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Tensor<B, 4>,
+        intrinsics: Tensor<B, 4>,
+    ) -> DepthAnything3Inference<B> {
+        self.with_cache(|cache| {
+            self.model
+                .infer_with_camera_cache(input, extrinsics, intrinsics, cache)
+        })
+    }
+
+    pub fn infer_with_trace(
+        &self,
+        input: Tensor<B, 4>,
+    ) -> (DepthAnything3Inference<B>, DepthTrace<B>) {
+        self.with_cache(|cache| self.model.infer_with_trace_cache(input, cache))
+    }
+
+    pub fn infer_raw(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
+        self.with_cache(|cache| self.model.infer_raw_with_cache(input, cache))
+    }
+
+    pub fn infer_from_tokens(
+        &self,
+        patches: &[Tensor<B, 3>],
+        height: usize,
+        width: usize,
+    ) -> (
+        DepthAnything3Inference<B>,
+        Option<Vec<Tensor<B, 4>>>,
+        Option<Tensor<B, 4>>,
+        Option<Tensor<B, 4>>,
+    ) {
+        self.with_cache(|cache| {
+            self.model
+                .infer_from_tokens_with_cache(patches, height, width, cache)
+        })
+    }
+
+    pub fn cache_mut(&self) -> std::cell::RefMut<'_, PosEmbedCache<B>> {
+        self.cache.borrow_mut()
     }
 }
 
@@ -204,7 +285,16 @@ impl<B: Backend> DepthAnything3<B> {
     }
 
     pub fn infer(&self, input: Tensor<B, 4>) -> DepthAnything3Inference<B> {
-        self.infer_with_context(input, None, None)
+        let mut cache = PosEmbedCache::new();
+        self.infer_with_context(input, None, None, &mut cache)
+    }
+
+    pub fn infer_with_cache(
+        &self,
+        input: Tensor<B, 4>,
+        cache: &mut PosEmbedCache<B>,
+    ) -> DepthAnything3Inference<B> {
+        self.infer_with_context(input, None, None, cache)
     }
 
     pub fn infer_with_camera(
@@ -213,15 +303,35 @@ impl<B: Backend> DepthAnything3<B> {
         extrinsics: Tensor<B, 4>,
         intrinsics: Tensor<B, 4>,
     ) -> DepthAnything3Inference<B> {
-        self.infer_with_context(input, Some(extrinsics), Some(intrinsics))
+        let mut cache = PosEmbedCache::new();
+        self.infer_with_context(input, Some(extrinsics), Some(intrinsics), &mut cache)
+    }
+
+    pub fn infer_with_camera_cache(
+        &self,
+        input: Tensor<B, 4>,
+        extrinsics: Tensor<B, 4>,
+        intrinsics: Tensor<B, 4>,
+        cache: &mut PosEmbedCache<B>,
+    ) -> DepthAnything3Inference<B> {
+        self.infer_with_context(input, Some(extrinsics), Some(intrinsics), cache)
     }
 
     pub fn infer_with_trace(
         &self,
         input: Tensor<B, 4>,
     ) -> (DepthAnything3Inference<B>, DepthTrace<B>) {
+        let mut cache = PosEmbedCache::new();
+        self.infer_with_trace_cache(input, &mut cache)
+    }
+
+    pub fn infer_with_trace_cache(
+        &self,
+        input: Tensor<B, 4>,
+        cache: &mut PosEmbedCache<B>,
+    ) -> (DepthAnything3Inference<B>, DepthTrace<B>) {
         let (head_output, camera_prediction, hooks) =
-            self.forward_with_camera_internal(input, None, None);
+            self.forward_with_camera_internal(input, None, None, cache);
         let aux_stage_necks = match &head_output {
             HeadForwardOutput::Dual(output) => Some(output.aux_stage_necks.clone()),
             _ => None,
@@ -251,18 +361,51 @@ impl<B: Backend> DepthAnything3<B> {
     }
 
     pub fn infer_raw(&self, input: Tensor<B, 4>) -> Tensor<B, 4> {
-        match self.forward_with_camera(input, None, None).0 {
+        let mut cache = PosEmbedCache::new();
+        self.infer_raw_with_cache(input, &mut cache)
+    }
+
+    pub fn infer_raw_with_cache(
+        &self,
+        input: Tensor<B, 4>,
+        cache: &mut PosEmbedCache<B>,
+    ) -> Tensor<B, 4> {
+        match self.forward_with_camera(input, None, None, cache).0 {
             HeadForwardOutput::Mono(logits) => logits,
             HeadForwardOutput::Dual(output) => output.depth_logits,
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    fn select_depth_channel(&self, tensor: Tensor<B, 4>) -> Tensor<B, 3> {
+        if let Some(head) = &self.head_mono {
+            head.select_depth_channel(tensor)
+        } else {
+            panic!("DepthAnything3 mono head not configured");
+        }
+    }
+
     pub fn infer_from_tokens(
         &self,
         patches: &[Tensor<B, 3>],
         height: usize,
         width: usize,
+    ) -> (
+        DepthAnything3Inference<B>,
+        Option<Vec<Tensor<B, 4>>>,
+        Option<Tensor<B, 4>>,
+        Option<Tensor<B, 4>>,
+    ) {
+        let mut cache = PosEmbedCache::new();
+        self.infer_from_tokens_with_cache(patches, height, width, &mut cache)
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn infer_from_tokens_with_cache(
+        &self,
+        patches: &[Tensor<B, 3>],
+        height: usize,
+        width: usize,
+        cache: &mut PosEmbedCache<B>,
     ) -> (
         DepthAnything3Inference<B>,
         Option<Vec<Tensor<B, 4>>>,
@@ -285,6 +428,7 @@ impl<B: Backend> DepthAnything3<B> {
                 width,
                 patch_start,
                 self.patch_size.0,
+                cache,
             ))
         } else if let Some(head) = &self.head_dual {
             let hooks = patches
@@ -301,6 +445,7 @@ impl<B: Backend> DepthAnything3<B> {
                 width,
                 patch_start,
                 self.patch_size.0,
+                cache,
             ))
         } else {
             panic!("DepthAnything3 has no head variant configured");
@@ -321,22 +466,15 @@ impl<B: Backend> DepthAnything3<B> {
         (inference, aux_stage_necks, aux_logits, aux_head_input)
     }
 
-    fn select_depth_channel(&self, tensor: Tensor<B, 4>) -> Tensor<B, 3> {
-        if let Some(head) = &self.head_mono {
-            head.select_depth_channel(tensor)
-        } else {
-            panic!("DepthAnything3 mono head not configured");
-        }
-    }
-
     fn infer_with_context(
         &self,
         input: Tensor<B, 4>,
         extrinsics: Option<Tensor<B, 4>>,
         intrinsics: Option<Tensor<B, 4>>,
+        cache: &mut PosEmbedCache<B>,
     ) -> DepthAnything3Inference<B> {
         let (head_output, camera_prediction) =
-            self.forward_with_camera(input, extrinsics, intrinsics);
+            self.forward_with_camera(input, extrinsics, intrinsics, cache);
         self.finalize_inference(head_output, camera_prediction)
     }
 
@@ -345,9 +483,10 @@ impl<B: Backend> DepthAnything3<B> {
         input: Tensor<B, 4>,
         extrinsics: Option<Tensor<B, 4>>,
         intrinsics: Option<Tensor<B, 4>>,
+        cache: &mut PosEmbedCache<B>,
     ) -> (HeadForwardOutput<B>, Option<CameraPrediction<B>>) {
         let (head_output, camera_prediction, _) =
-            self.forward_with_camera_internal(input, extrinsics, intrinsics);
+            self.forward_with_camera_internal(input, extrinsics, intrinsics, cache);
         (head_output, camera_prediction)
     }
 
@@ -356,6 +495,7 @@ impl<B: Backend> DepthAnything3<B> {
         input: Tensor<B, 4>,
         extrinsics: Option<Tensor<B, 4>>,
         intrinsics: Option<Tensor<B, 4>>,
+        cache: &mut PosEmbedCache<B>,
     ) -> (
         HeadForwardOutput<B>,
         Option<CameraPrediction<B>>,
@@ -403,6 +543,7 @@ impl<B: Backend> DepthAnything3<B> {
                 width,
                 patch_start,
                 self.patch_size.0,
+                cache,
             ))
         } else if let Some(head) = &self.head_dual {
             HeadForwardOutput::Dual(head.forward_dual(
@@ -411,6 +552,7 @@ impl<B: Backend> DepthAnything3<B> {
                 width,
                 patch_start,
                 self.patch_size.0,
+                cache,
             ))
         } else {
             panic!("DepthAnything3 has no head variant configured");
@@ -495,6 +637,50 @@ mod tests {
         let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
         let output = model.infer(input);
         assert_eq!(output.depth.shape().dims(), [1, 518, 518]);
+    }
+
+    #[test]
+    fn cached_depth_anything3_matches_uncached() {
+        let device = <InferenceBackend as Backend>::Device::default();
+        let config = DepthAnything3Config::metric_large();
+        let model = DepthAnything3::<InferenceBackend>::new(&device, config);
+        let cached = CachedDepthAnything3::new(model.clone());
+
+        let input_a = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
+        let input_b = input_a.clone();
+
+        let base = model.infer(input_a);
+        let cached_first = cached.infer(input_b.clone());
+        let cached_second = cached.infer(input_b);
+
+        let base_data = base.depth.into_data().convert::<f32>();
+        let cached_first_data = cached_first.depth.into_data().convert::<f32>();
+        let cached_second_data = cached_second.depth.into_data().convert::<f32>();
+
+        assert_eq!(
+            base_data.to_vec::<f32>().unwrap(),
+            cached_first_data.to_vec::<f32>().unwrap()
+        );
+        assert_eq!(
+            cached_first_data.to_vec::<f32>().unwrap(),
+            cached_second_data.to_vec::<f32>().unwrap()
+        );
+    }
+
+    #[test]
+    fn pos_embed_cache_reused_across_inference() {
+        let device = <InferenceBackend as Backend>::Device::default();
+        let config = DepthAnything3Config::metric_large();
+        let model = DepthAnything3::<InferenceBackend>::new(&device, config);
+        let mut cache = PosEmbedCache::new();
+
+        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
+        assert_eq!(cache.entry_count(), 0);
+        model.infer_with_cache(input.clone(), &mut cache);
+        let first_count = cache.entry_count();
+        assert!(first_count > 0);
+        model.infer_with_cache(input, &mut cache);
+        assert_eq!(first_count, cache.entry_count());
     }
 
     #[cfg(feature = "backend_wgpu")]
