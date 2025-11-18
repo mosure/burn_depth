@@ -96,6 +96,7 @@ impl<B: Backend> CachedDepthAnything3<B> {
         self.with_cache(|cache| self.model.infer_raw_with_cache(input, cache))
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn infer_from_tokens(
         &self,
         patches: &[Tensor<B, 3>],
@@ -384,6 +385,7 @@ impl<B: Backend> DepthAnything3<B> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn infer_from_tokens(
         &self,
         patches: &[Tensor<B, 3>],
