@@ -1,12 +1,27 @@
 use crate::model::DepthModelKind;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     fmt,
     fs::{self, File},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
+
+pub const DEFAULT_CDN_BASE_URL: &str = "https://aberration.technology/model/burn_depth";
+const DEFAULT_CACHE_DIR: &str = ".burn_depth";
+#[cfg(not(target_arch = "wasm32"))]
+const DOWNLOAD_MAX_ATTEMPTS: u32 = 4;
+#[cfg(not(target_arch = "wasm32"))]
+const DOWNLOAD_RETRY_BASE_DELAY_MS: u64 = 500;
+#[cfg(not(target_arch = "wasm32"))]
+const DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 20;
+#[cfg(not(target_arch = "wasm32"))]
+const DOWNLOAD_READ_TIMEOUT_SECS: u64 = 60;
+#[cfg(not(target_arch = "wasm32"))]
+const DOWNLOAD_WRITE_TIMEOUT_SECS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,11 +40,52 @@ pub struct DepthLoadConfig {
     pub require_gpu: bool,
 }
 
+impl DepthLoadConfig {
+    pub fn cdn(model: DepthModelKind, precision: DepthPrecision) -> Self {
+        Self {
+            model,
+            precision,
+            checkpoint: DepthCheckpointSource::default_cdn(model, precision),
+            cache_dir: None,
+            allow_download: true,
+            require_gpu: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum DepthCheckpointSource {
     Local(PathBuf),
     PartsManifest(PathBuf),
     Cdn { base_url: String, manifest: String },
+}
+
+impl DepthCheckpointSource {
+    pub fn default_cdn(model: DepthModelKind, precision: DepthPrecision) -> Self {
+        Self::Cdn {
+            base_url: default_cdn_base_url(),
+            manifest: model.default_cdn_manifest(precision).to_string(),
+        }
+    }
+}
+
+impl DepthModelKind {
+    pub fn default_cdn_manifest(self, precision: DepthPrecision) -> &'static str {
+        match (self, precision) {
+            (DepthModelKind::DepthPro, DepthPrecision::F32) => "depth-pro/depth_pro.bpk.parts.json",
+            (DepthModelKind::DepthPro, DepthPrecision::F16) => {
+                "depth-pro/depth_pro_f16.bpk.parts.json"
+            }
+            (
+                DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3,
+                DepthPrecision::F32,
+            ) => "da3/da3_metric_large.bpk.parts.json",
+            (
+                DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3,
+                DepthPrecision::F16,
+            ) => "da3/da3_metric_large_f16.bpk.parts.json",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +147,7 @@ pub enum DepthLoadError {
         expected: u64,
         actual: u64,
     },
+    Download(String),
     DownloadUnsupported(String),
     InvalidSource(String),
 }
@@ -125,6 +182,7 @@ impl fmt::Display for DepthLoadError {
                 "length mismatch for `{}`: expected {expected} bytes, got {actual}",
                 path.display()
             ),
+            Self::Download(message) => write!(f, "{message}"),
             Self::DownloadUnsupported(message) => write!(f, "{message}"),
             Self::InvalidSource(message) => write!(f, "{message}"),
         }
@@ -184,17 +242,175 @@ pub fn resolve_checkpoint(
         DepthCheckpointSource::PartsManifest(path) => {
             assemble_parts_manifest(path, config.cache_dir.as_deref(), &mut progress)
         }
-        DepthCheckpointSource::Cdn { base_url, manifest } => {
-            if !config.allow_download {
-                return Err(DepthLoadError::InvalidSource(format!(
-                    "downloads disabled for CDN checkpoint {base_url}/{manifest}"
-                )));
-            }
-            Err(DepthLoadError::DownloadUnsupported(
-                "CDN loading requires a caller-provided native or wasm fetcher; synchronous downloads are intentionally not built into the core loader".to_string(),
-            ))
-        }
+        DepthCheckpointSource::Cdn { base_url, manifest } => resolve_cdn_checkpoint(
+            base_url,
+            manifest,
+            config.cache_dir.as_deref(),
+            config.allow_download,
+            &mut progress,
+        ),
     }
+}
+
+pub fn default_cdn_base_url() -> String {
+    option_env!("BURN_DEPTH_MODEL_BASE_URL")
+        .unwrap_or(DEFAULT_CDN_BASE_URL)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+pub fn default_cache_dir() -> PathBuf {
+    if let Some(home) = user_home_dir() {
+        home.join(DEFAULT_CACHE_DIR)
+    } else {
+        PathBuf::from(DEFAULT_CACHE_DIR)
+    }
+}
+
+pub fn cdn_manifest_url(base_url: &str, manifest: &str) -> String {
+    if manifest.contains("://") {
+        return manifest.to_string();
+    }
+    join_url(base_url, manifest)
+}
+
+pub fn resolve_cdn_checkpoint(
+    base_url: &str,
+    manifest: &str,
+    cache_dir: Option<&Path>,
+    allow_download: bool,
+    progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<PathBuf, DepthLoadError> {
+    let cache_root = cache_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_cache_dir);
+    let local_manifest_path = cache_root.join(safe_relative_path(manifest));
+
+    if local_manifest_path.exists() {
+        match assemble_parts_manifest(&local_manifest_path, None, progress) {
+            Ok(path) => return Ok(path),
+            Err(err) => {
+                emit(
+                    progress,
+                    DepthLoadEvent::new(
+                        DepthLoadStage::CacheMiss,
+                        format!("cached CDN artifact incomplete: {err}"),
+                    ),
+                );
+                if !allow_download {
+                    return Err(err);
+                }
+            }
+        }
+    } else if !allow_download {
+        return Err(DepthLoadError::InvalidSource(format!(
+            "downloads disabled and cached CDN manifest is missing: {}",
+            local_manifest_path.display()
+        )));
+    }
+
+    if !allow_download {
+        return Err(DepthLoadError::InvalidSource(
+            "downloads disabled for CDN checkpoint".to_string(),
+        ));
+    }
+
+    download_cdn_checkpoint(base_url, manifest, &local_manifest_path, progress)?;
+    assemble_parts_manifest(&local_manifest_path, None, progress)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn download_cdn_checkpoint(
+    base_url: &str,
+    manifest: &str,
+    _local_manifest_path: &Path,
+    _progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<(), DepthLoadError> {
+    Err(DepthLoadError::DownloadUnsupported(format!(
+        "CDN checkpoint {}/{} requires async fetch integration on wasm; synchronous XHR is not used",
+        base_url.trim_end_matches('/'),
+        manifest.trim_start_matches('/')
+    )))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_cdn_checkpoint(
+    base_url: &str,
+    manifest: &str,
+    local_manifest_path: &Path,
+    progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<(), DepthLoadError> {
+    let manifest_url = cdn_manifest_url(base_url, manifest);
+    emit(
+        progress,
+        DepthLoadEvent::new(
+            DepthLoadStage::Manifest,
+            format!("downloading {manifest_url}"),
+        ),
+    );
+    let manifest_bytes = download_bytes_with_retries(&manifest_url)?;
+    let artifact_manifest: DepthArtifactManifest = serde_json::from_slice(&manifest_bytes)?;
+    if artifact_manifest.parts.is_empty() {
+        return Err(DepthLoadError::InvalidSource(format!(
+            "CDN manifest {manifest_url} has no parts"
+        )));
+    }
+    write_file_atomically(local_manifest_path, &manifest_bytes)?;
+
+    for (index, part) in artifact_manifest.parts.iter().enumerate() {
+        let part_path = resolve_part_entry_path(local_manifest_path, &part.name)?;
+        match verify_file(&part_path, Some(part.byte_length), Some(&part.sha256)) {
+            Ok(()) => {
+                emit(
+                    progress,
+                    DepthLoadEvent::progress(
+                        DepthLoadStage::CacheHit,
+                        format!("using cached {}", part_path.display()),
+                        index + 1,
+                        artifact_manifest.parts.len(),
+                    ),
+                );
+                continue;
+            }
+            Err(err) if part_path.exists() => {
+                emit(
+                    progress,
+                    DepthLoadEvent::progress(
+                        DepthLoadStage::CacheMiss,
+                        format!("discarding corrupt cached part: {err}"),
+                        index + 1,
+                        artifact_manifest.parts.len(),
+                    ),
+                );
+                let _ = fs::remove_file(&part_path);
+            }
+            Err(_) => {
+                emit(
+                    progress,
+                    DepthLoadEvent::progress(
+                        DepthLoadStage::CacheMiss,
+                        format!("missing {}", part_path.display()),
+                        index + 1,
+                        artifact_manifest.parts.len(),
+                    ),
+                );
+            }
+        }
+
+        let part_url = resolve_manifest_entry_url(&manifest_url, &part.name);
+        emit(
+            progress,
+            DepthLoadEvent::progress(
+                DepthLoadStage::Part,
+                format!("downloading {part_url}"),
+                index + 1,
+                artifact_manifest.parts.len(),
+            ),
+        );
+        download_part_file(&part_url, &part_path, part)?;
+    }
+
+    Ok(())
 }
 
 pub fn assemble_parts_manifest(
@@ -262,7 +478,7 @@ pub fn assemble_parts_manifest(
     let mut full_hasher = Sha256::new();
 
     for (index, part) in manifest.parts.iter().enumerate() {
-        let part_path = base_dir.join(&part.name);
+        let part_path = resolve_part_entry_path(manifest_path, &part.name)?;
         emit(
             progress,
             DepthLoadEvent::progress(
@@ -296,6 +512,17 @@ pub fn assemble_parts_manifest(
     );
     fs::rename(&tmp_path, &output_path)?;
     Ok(output_path)
+}
+
+pub fn resolve_part_entry_path(
+    manifest_path: impl AsRef<Path>,
+    entry: &str,
+) -> Result<PathBuf, DepthLoadError> {
+    let manifest_path = manifest_path.as_ref();
+    let base_dir = manifest_path
+        .parent()
+        .ok_or_else(|| DepthLoadError::MissingParent(manifest_path.to_path_buf()))?;
+    Ok(base_dir.join(safe_relative_path(entry)))
 }
 
 pub fn verify_file(
@@ -383,6 +610,235 @@ fn verify_bytes(
 fn artifact_name_from_manifest_path(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
     name.strip_suffix(".parts.json").map(ToOwned::to_owned)
+}
+
+fn safe_relative_path(value: &str) -> PathBuf {
+    let without_fragment = value.split('#').next().unwrap_or(value);
+    let without_query = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let pathish = if let Some((_, after_scheme)) = without_query.split_once("://") {
+        after_scheme
+            .split_once('/')
+            .map(|(_, path)| path)
+            .unwrap_or("model.bpk.parts.json")
+    } else {
+        without_query.trim_start_matches('/')
+    };
+
+    let normalized = pathish.replace('\\', "/");
+    let mut out = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        if let Component::Normal(value) = component {
+            out.push(value);
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push("model.bpk.parts.json");
+    }
+    out
+}
+
+fn join_url(root: &str, rel: &str) -> String {
+    let mut out = root.trim_end_matches('/').to_string();
+    out.push('/');
+    out.push_str(rel.trim_start_matches('/'));
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_manifest_entry_url(manifest_url: &str, entry_url: &str) -> String {
+    if entry_url.contains("://") || entry_url.starts_with('/') {
+        return entry_url.to_string();
+    }
+    let normalized = entry_url.replace('\\', "/");
+    if let Some((parent, _)) = manifest_url.rsplit_once('/') {
+        return format!("{}/{}", parent.trim_end_matches('/'), normalized);
+    }
+    normalized
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        return Some(home);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            return Some(profile);
+        }
+        let drive = std::env::var_os("HOMEDRIVE");
+        let path = std::env::var_os("HOMEPATH");
+        if let (Some(drive), Some(path)) = (drive, path) {
+            return Some(PathBuf::from(format!(
+                "{}{}",
+                drive.to_string_lossy(),
+                path.to_string_lossy()
+            )));
+        }
+    }
+    None
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_bytes_with_retries(url: &str) -> Result<Vec<u8>, DepthLoadError> {
+    let mut last_error = None;
+    for attempt in 1..=DOWNLOAD_MAX_ATTEMPTS {
+        match download_bytes_once(url) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) => {
+                if attempt == DOWNLOAD_MAX_ATTEMPTS {
+                    return Err(err);
+                }
+                last_error = Some(err);
+                std::thread::sleep(retry_delay(attempt));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        DepthLoadError::Download(format!("failed downloading {url}: unknown error"))
+    }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_bytes_once(url: &str) -> Result<Vec<u8>, DepthLoadError> {
+    let response = http_agent()
+        .get(url)
+        .call()
+        .map_err(|err| DepthLoadError::Download(format_download_error(url, err)))?;
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|err| DepthLoadError::Download(format!("failed to read {url}: {err}")))?;
+    Ok(bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_part_file(
+    url: &str,
+    destination: &Path,
+    part: &DepthArtifactPart,
+) -> Result<(), DepthLoadError> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let partial_path = partial_download_path(destination);
+    if partial_path.exists() {
+        let _ = fs::remove_file(&partial_path);
+    }
+
+    let response = http_agent()
+        .get(url)
+        .call()
+        .map_err(|err| DepthLoadError::Download(format_download_error(url, err)))?;
+    let mut reader = response.into_reader();
+    let mut writer = File::create(&partial_path)?;
+    let mut hasher = Sha256::new();
+    let mut len = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|err| DepthLoadError::Download(format!("failed to read {url}: {err}")))?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buffer[..read])?;
+        hasher.update(&buffer[..read]);
+        len += read as u64;
+    }
+    writer.flush()?;
+    drop(writer);
+
+    if len != part.byte_length {
+        let _ = fs::remove_file(&partial_path);
+        return Err(DepthLoadError::LengthMismatch {
+            path: destination.to_path_buf(),
+            expected: part.byte_length,
+            actual: len,
+        });
+    }
+    let actual = hex_sha256(hasher.finalize().as_slice());
+    let expected = normalize_sha256(&part.sha256);
+    if actual != expected {
+        let _ = fs::remove_file(&partial_path);
+        return Err(DepthLoadError::HashMismatch {
+            path: destination.to_path_buf(),
+            expected,
+            actual,
+        });
+    }
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+    fs::rename(partial_path, destination)?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), DepthLoadError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_path = temp_download_path(path);
+    fs::write(&temp_path, bytes)?;
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(temp_path, path)?;
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(DOWNLOAD_CONNECT_TIMEOUT_SECS))
+        .timeout_read(Duration::from_secs(DOWNLOAD_READ_TIMEOUT_SECS))
+        .timeout_write(Duration::from_secs(DOWNLOAD_WRITE_TIMEOUT_SECS))
+        .build()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn retry_delay(attempt: u32) -> Duration {
+    let exponent = attempt.saturating_sub(1).min(6);
+    let factor = 1u64 << exponent;
+    Duration::from_millis(DOWNLOAD_RETRY_BASE_DELAY_MS.saturating_mul(factor))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn partial_download_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download.bin");
+    path.with_file_name(format!("{file_name}.partial"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn temp_download_path(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download.bin");
+    path.with_file_name(format!("{file_name}.download-{nanos}.tmp"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn format_download_error(url: &str, err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, response) => {
+            format!("HTTP {code} ({}) for {url}", response.status_text())
+        }
+        ureq::Error::Transport(transport) => {
+            format!("transport error while downloading {url}: {transport}")
+        }
+    }
 }
 
 fn normalize_sha256(value: &str) -> String {

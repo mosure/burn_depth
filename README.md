@@ -16,21 +16,14 @@ burn [depth pro](https://github.com/apple/ml-depth-pro) model inference
 
 ```rust
 use burn_depth::{
-    DepthCheckpointSource, DepthLoadConfig, DepthModelKind, DepthPipeline,
-    DepthPrecision, DepthRuntimeConfig, InferenceBackend,
+    DepthLoadConfig, DepthModelKind, DepthPipeline, DepthPrecision,
+    DepthRuntimeConfig, InferenceBackend,
 };
 
 let device = burn::tensor::Device::<InferenceBackend>::default();
 let pipeline = DepthPipeline::<InferenceBackend>::load(
     &device,
-    DepthLoadConfig {
-        model: DepthModelKind::DepthPro,
-        precision: DepthPrecision::F32,
-        checkpoint: DepthCheckpointSource::Local("models/depth-pro/depth_pro.bpk".into()),
-        cache_dir: None,
-        allow_download: false,
-        require_gpu: true,
-    },
+    DepthLoadConfig::cdn(DepthModelKind::DepthPro, DepthPrecision::F32),
 )?;
 
 let image = image::open("assets/image/test.jpg")?;
@@ -57,9 +50,35 @@ cargo run --example inference -- \
 
 `DepthCheckpointSource::Local` loads a single `.bpk`. `DepthCheckpointSource::PartsManifest`
 loads a local `.bpk.parts.json`, verifies every part SHA256, assembles atomically into the cache
-directory, and verifies the full artifact hash. `DepthCheckpointSource::Cdn` is represented in
-the public API, but fetching is intentionally caller-provided so native and wasm apps can use
-their own async HTTP stack and progress events.
+directory, and verifies the full artifact hash.
+
+`DepthLoadConfig::cdn(model, precision)` uses `DepthCheckpointSource::Cdn` with:
+
+- default base URL: `https://aberration.technology/model/burn_depth`
+- default cache directory: `$HOME/.burn_depth`
+- default manifests:
+  - `depth-pro/depth_pro.bpk.parts.json`
+  - `depth-pro/depth_pro_f16.bpk.parts.json`
+  - `da3/da3_metric_large.bpk.parts.json`
+  - `da3/da3_metric_large_f16.bpk.parts.json`
+
+For example, DA3 metric large f16 resolves to:
+
+```text
+https://aberration.technology/model/burn_depth/da3/da3_metric_large_f16.bpk.parts.json
+```
+
+Each part URL is resolved relative to the manifest URL, so a manifest entry named
+`da3_metric_large_f16.part-00000.bpk` is fetched from:
+
+```text
+https://aberration.technology/model/burn_depth/da3/da3_metric_large_f16.part-00000.bpk
+```
+
+Native loads download the manifest and missing/stale parts into the cache using partial files,
+verify SHA256/byte lengths, assemble the full `.bpk`, and reuse the cached model when
+`allow_download` is false. Wasm callers should use an async fetch integration; the core loader
+does not perform synchronous XHR.
 
 ## setup
 

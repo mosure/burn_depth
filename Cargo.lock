@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "burn_depth"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "burn",
  "burn-import",
@@ -2596,6 +2596,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "stacker",
+ "ureq",
  "wasm-bindgen",
  "web-sys",
  "wgpu",

@@ -2,15 +2,17 @@ use std::{
     collections::HashSet,
     convert::TryInto,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use burn::{
     module::Module,
     record::{HalfPrecisionSettings, Record},
+    tensor::{DType, TensorData},
 };
 use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
 use burn_store::{
-    ApplyResult, ModuleSnapshot, TensorSnapshot,
+    ApplyResult, ModuleAdapter, ModuleSnapshot, ModuleStore, PyTorchToBurnAdapter, TensorSnapshot,
     pytorch::{PytorchReader, PytorchStore},
 };
 use clap::Parser;
@@ -79,9 +81,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut store = build_store(&checkpoint_path);
 
     println!("Loading checkpoint {}", checkpoint_path.display());
-    let result = model
-        .load_from(&mut store)
-        .map_err(|err| format!("Failed to apply PyTorch checkpoint: {err}"))?;
+    let snapshots = store
+        .get_all_snapshots()
+        .map_err(|err| format!("Failed to read PyTorch checkpoint: {err}"))?
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    let result = model.apply(
+        snapshots,
+        None,
+        Some(Box::new(PyTorchToBurnAdapter.chain(F16ToF32Adapter))),
+        true,
+    );
+    if !result.errors.is_empty() {
+        return Err(format!("Failed to apply PyTorch checkpoint:\n{result}").into());
+    }
 
     report_apply_result(&result, debug)?;
     model.fix_conv_transpose_weights();
@@ -115,6 +129,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Wrote sharded manifest to {}", manifest.display());
     }
     Ok(())
+}
+
+#[derive(Clone)]
+struct F16ToF32Adapter;
+
+impl ModuleAdapter for F16ToF32Adapter {
+    fn adapt(&self, snapshot: &TensorSnapshot) -> TensorSnapshot {
+        if snapshot.dtype != DType::F16 {
+            return snapshot.clone();
+        }
+
+        let data_fn = snapshot.clone_data_fn();
+        TensorSnapshot::from_closure(
+            Rc::new(move || {
+                let data: TensorData = data_fn()?;
+                Ok(data.convert_dtype(DType::F32))
+            }),
+            DType::F32,
+            snapshot.shape.clone(),
+            snapshot.path_stack.clone().unwrap_or_default(),
+            snapshot.container_stack.clone().unwrap_or_default(),
+            snapshot.tensor_id.unwrap_or_default(),
+        )
+    }
+
+    fn clone_box(&self) -> Box<dyn ModuleAdapter> {
+        Box::new(self.clone())
+    }
 }
 
 fn default_output(precision: ImportPrecision) -> PathBuf {
@@ -192,7 +234,10 @@ fn build_store(path: &Path) -> PytorchStore {
     for &(from, to) in key_remap_rules() {
         store = store.with_key_remapping(from, to);
     }
-    store.allow_partial(true).validate(true)
+    store
+        .map_indices_contiguous(false)
+        .allow_partial(true)
+        .validate(true)
 }
 
 fn validate_against_reference(
@@ -673,6 +718,19 @@ fn debug_print_checkpoint(path: &Path) -> Result<(), Box<dyn std::error::Error>>
     if !fov_downsample.is_empty() {
         println!("Debug: sample `fov.downsample` tensors:");
         for (key, shape) in fov_downsample.iter().take(10) {
+            println!("  {key}: {:?}", shape);
+        }
+    }
+
+    let mut decoder_convs: Vec<_> = tensors
+        .iter()
+        .filter(|(key, _)| key.starts_with("decoder.convs"))
+        .map(|(key, snapshot)| (key.clone(), snapshot.shape.clone()))
+        .collect();
+    decoder_convs.sort_by(|a, b| a.0.cmp(&b.0));
+    if !decoder_convs.is_empty() {
+        println!("Debug: `decoder.convs` tensors:");
+        for (key, shape) in &decoder_convs {
             println!("  {key}: {:?}", shape);
         }
     }

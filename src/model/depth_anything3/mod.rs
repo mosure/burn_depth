@@ -631,8 +631,24 @@ mod tests {
     #[cfg(feature = "backend_wgpu")]
     use burn::record::{HalfPrecisionSettings, Record};
 
+    #[cfg(feature = "backend_wgpu")]
+    fn ensure_wgpu_test_runtime(label: &'static str) -> bool {
+        match crate::wgpu_test_support::ensure_runtime() {
+            Ok(_) => true,
+            Err(reason) => {
+                println!("ignored {label}: {reason}");
+                false
+            }
+        }
+    }
+
     #[test]
     fn depth_anything3_emits_depth_tensor() {
+        #[cfg(feature = "backend_wgpu")]
+        if !ensure_wgpu_test_runtime("DepthAnything3 WGPU backend test") {
+            return;
+        }
+
         let device = burn::tensor::Device::<InferenceBackend>::default();
         let config = test_mono_config();
         let model = DepthAnything3::<InferenceBackend>::new(&device, config);
@@ -643,6 +659,11 @@ mod tests {
 
     #[test]
     fn cached_depth_anything3_is_repeatable() {
+        #[cfg(feature = "backend_wgpu")]
+        if !ensure_wgpu_test_runtime("DepthAnything3 WGPU backend test") {
+            return;
+        }
+
         let device = burn::tensor::Device::<InferenceBackend>::default();
         let config = test_mono_config();
         let cached =
@@ -678,6 +699,11 @@ mod tests {
 
     #[test]
     fn pos_embed_cache_reused_across_inference() {
+        #[cfg(feature = "backend_wgpu")]
+        if !ensure_wgpu_test_runtime("DepthAnything3 WGPU backend test") {
+            return;
+        }
+
         let device = burn::tensor::Device::<InferenceBackend>::default();
         let config = test_mono_config();
         let model = DepthAnything3::<InferenceBackend>::new(&device, config);
@@ -695,6 +721,10 @@ mod tests {
     #[cfg(feature = "backend_wgpu")]
     #[test]
     fn depth_anything3_wgpu_record_roundtrip() {
+        if !ensure_wgpu_test_runtime("DepthAnything3 WGPU backend test") {
+            return;
+        }
+
         type TestBackend = burn::backend::Wgpu<f32>;
         let device = burn::tensor::Device::<TestBackend>::default();
         let config = test_mono_config();

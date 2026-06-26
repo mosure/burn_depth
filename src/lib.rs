@@ -13,7 +13,8 @@ pub use geometry::{
 };
 pub use loader::{
     DepthArtifactManifest, DepthArtifactPart, DepthCheckpointSource, DepthLoadConfig,
-    DepthLoadError, DepthLoadEvent, DepthLoadStage, DepthPrecision,
+    DepthLoadError, DepthLoadEvent, DepthLoadStage, DepthPrecision, cdn_manifest_url,
+    default_cache_dir, default_cdn_base_url,
 };
 pub use model::DepthModelKind;
 pub use pipeline::{DepthPipeline, DepthPipelineError, DepthRuntimeConfig};
@@ -40,6 +41,47 @@ pub type InferenceBackend = burn::backend::NdArray;
 ))]
 pub type InferenceBackend = burn::backend::Cpu;
 
+#[cfg(all(test, feature = "backend_wgpu"))]
+pub(crate) mod wgpu_test_support {
+    use burn::prelude::Backend;
+    use burn::tensor::{DType, Device};
+    use std::panic::{self, AssertUnwindSafe};
+    use std::sync::OnceLock;
+
+    type TestBackend = burn::backend::Wgpu<f32>;
+
+    static WGPU_RUNTIME: OnceLock<Result<(), String>> = OnceLock::new();
+    static WGPU_F16: OnceLock<Result<bool, String>> = OnceLock::new();
+
+    pub(crate) fn ensure_runtime() -> Result<(), String> {
+        WGPU_RUNTIME
+            .get_or_init(|| {
+                let device = Device::<TestBackend>::default();
+                match panic::catch_unwind(AssertUnwindSafe(|| {
+                    TestBackend::supports_dtype(&device, DType::F32)
+                })) {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err("WGPU backend does not support f32 tensors.".to_string()),
+                    Err(_) => Err("Failed to initialize WGPU runtime for tests.".to_string()),
+                }
+            })
+            .clone()
+    }
+
+    pub(crate) fn supports_f16() -> Result<bool, String> {
+        WGPU_F16
+            .get_or_init(|| {
+                ensure_runtime()?;
+                let device = Device::<TestBackend>::default();
+                panic::catch_unwind(AssertUnwindSafe(|| {
+                    TestBackend::supports_dtype(&device, DType::F16)
+                }))
+                .map_err(|_| "Failed to query WGPU f16 support.".to_string())
+            })
+            .clone()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::model::depth_pro::{DepthPro, DepthProConfig, layers::vit::DINOV2_L16_128};
@@ -50,17 +92,9 @@ mod tests {
     #[cfg(feature = "backend_ndarray")]
     use burn::backend::NdArray as NdArrayBackend;
 
-    #[cfg(feature = "backend_wgpu")]
-    use burn::backend::wgpu::{RuntimeOptions, graphics::AutoGraphicsApi, init_setup};
-
     use burn::prelude::*;
     use std::any::type_name;
     use std::panic::{self, AssertUnwindSafe};
-
-    #[cfg(feature = "backend_wgpu")]
-    use std::sync::OnceLock;
-    #[cfg(feature = "backend_wgpu")]
-    use wgpu::Features;
 
     #[cfg(feature = "backend_wgpu")]
     use half::f16;
@@ -71,29 +105,9 @@ mod tests {
     type WgpuF32Backend = burn::backend::Wgpu<f32>;
 
     #[cfg(feature = "backend_wgpu")]
-    static WGPU_FEATURES: OnceLock<Result<Features, String>> = OnceLock::new();
-
-    #[cfg(feature = "backend_wgpu")]
-    fn ensure_wgpu_runtime() -> Result<Features, String> {
-        WGPU_FEATURES
-            .get_or_init(|| {
-                let device = burn::tensor::Device::<WgpuF32Backend>::default();
-                match panic::catch_unwind(AssertUnwindSafe(|| {
-                    init_setup::<AutoGraphicsApi>(&device, RuntimeOptions::default())
-                })) {
-                    Ok(setup) => Ok(setup.adapter.features()),
-                    Err(_) => Err("Failed to initialize WGPU runtime for tests.".to_string()),
-                }
-            })
-            .clone()
-    }
-
-    #[cfg(feature = "backend_wgpu")]
     fn init_wgpu_f16_device() -> Result<burn::tensor::Device<WgpuHalfBackend>, String> {
-        let features = ensure_wgpu_runtime()?;
-
-        if !features.contains(Features::SHADER_F16) {
-            return Err("adapter does not expose SHADER_F16".to_string());
+        if !crate::wgpu_test_support::supports_f16()? {
+            return Err("adapter does not expose general f16 tensor support".to_string());
         }
 
         Ok(burn::tensor::Device::<WgpuHalfBackend>::default())
@@ -101,7 +115,7 @@ mod tests {
 
     #[cfg(feature = "backend_wgpu")]
     fn init_wgpu_f32_device() -> Result<burn::tensor::Device<WgpuF32Backend>, String> {
-        ensure_wgpu_runtime()?;
+        crate::wgpu_test_support::ensure_runtime()?;
         Ok(burn::tensor::Device::<WgpuF32Backend>::default())
     }
 
