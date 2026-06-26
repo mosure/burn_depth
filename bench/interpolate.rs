@@ -16,7 +16,7 @@ criterion_group! {
 criterion_main!(interpolation_benchmarks);
 
 fn interpolation_benchmark(c: &mut Criterion) {
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
     let bench_device = device.clone();
 
     struct ResizeCase {
@@ -93,7 +93,7 @@ fn interpolation_benchmark(c: &mut Criterion) {
                     [case.out_height, case.out_width],
                     InterpolationMethod::Custom,
                 );
-                InferenceBackend::sync(&bench_device);
+                let _ = InferenceBackend::sync(&bench_device);
                 black_box(output);
             });
         });
@@ -105,7 +105,7 @@ fn interpolation_benchmark(c: &mut Criterion) {
                     [case.out_height, case.out_width],
                     InterpolationMethod::Burn,
                 );
-                InferenceBackend::sync(&bench_device);
+                let _ = InferenceBackend::sync(&bench_device);
                 black_box(output);
             });
         });

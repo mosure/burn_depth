@@ -1,11 +1,14 @@
 pub mod depth_anything3;
 pub mod depth_pro;
 
+use crate::loader::DepthPrecision;
 use burn::{
     module::Module,
     prelude::*,
     record::{HalfPrecisionSettings, NamedMpkFileRecorder},
 };
+#[cfg(feature = "bpk")]
+use burn_store::{BurnpackStore, HalfPrecisionAdapter, ModuleSnapshot};
 use image::{
     RgbImage,
     imageops::{self, FilterType},
@@ -17,21 +20,27 @@ use depth_anything3::DepthAnything3Config;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DepthModelKind {
     DepthPro,
+    DepthAnything3MetricLarge,
+    #[deprecated(note = "use DepthAnything3MetricLarge")]
     DepthAnything3,
 }
 
 impl DepthModelKind {
     pub fn default_checkpoint(self) -> &'static str {
         match self {
-            DepthModelKind::DepthPro => "assets/model/depth_pro.mpk",
-            DepthModelKind::DepthAnything3 => "assets/model/da3_metric_large.mpk",
+            DepthModelKind::DepthPro => "models/depth-pro/depth_pro.bpk",
+            DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3 => {
+                "models/da3/da3_metric_large.bpk"
+            }
         }
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             DepthModelKind::DepthPro => "depth-pro",
-            DepthModelKind::DepthAnything3 => "depth-anything-3",
+            DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3 => {
+                "depth-anything-3-metric-large"
+            }
         }
     }
 }
@@ -49,12 +58,63 @@ impl<B: Backend> AnyDepthModel<B> {
         device: &B::Device,
         checkpoint: &Path,
     ) -> Result<Self, String> {
+        Self::load_with_precision(kind, device, checkpoint, DepthPrecision::F32)
+    }
+
+    pub fn load_with_precision(
+        kind: DepthModelKind,
+        device: &B::Device,
+        checkpoint: &Path,
+        precision: DepthPrecision,
+    ) -> Result<Self, String> {
+        if is_burnpack(checkpoint) {
+            return Self::load_burnpack(kind, device, checkpoint, precision);
+        }
+
         match kind {
             DepthModelKind::DepthPro => depth_pro::DepthPro::<B>::load(device, checkpoint)
                 .map(Self::DepthPro)
                 .map_err(|err| format!("Failed to load DepthPro checkpoint: {err}")),
-            DepthModelKind::DepthAnything3 => Self::load_depth_anything3(device, checkpoint),
+            DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3 => {
+                Self::load_depth_anything3(device, checkpoint)
+            }
         }
+    }
+
+    #[cfg(feature = "bpk")]
+    fn load_burnpack(
+        kind: DepthModelKind,
+        device: &B::Device,
+        checkpoint: &Path,
+        precision: DepthPrecision,
+    ) -> Result<Self, String> {
+        match kind {
+            DepthModelKind::DepthPro => {
+                let mut store = burnpack_load_store(checkpoint, precision);
+                let mut model =
+                    depth_pro::DepthPro::<B>::new(device, depth_pro::DepthProConfig::default());
+                model
+                    .load_from(&mut store)
+                    .map_err(|err| format!("Failed to load DepthPro BurnPack checkpoint: {err}"))?;
+                Ok(Self::DepthPro(model))
+            }
+            DepthModelKind::DepthAnything3MetricLarge | DepthModelKind::DepthAnything3 => {
+                Self::load_depth_anything3_burnpack(device, checkpoint, precision)
+            }
+        }
+    }
+
+    #[cfg(not(feature = "bpk"))]
+    fn load_burnpack(
+        _kind: DepthModelKind,
+        _device: &B::Device,
+        checkpoint: &Path,
+        _precision: DepthPrecision,
+    ) -> Result<Self, String> {
+        Err(format!(
+            "BurnPack checkpoint `{}` requires the `bpk` feature",
+            checkpoint.display()
+        ))
     }
 
     fn load_depth_anything3(device: &B::Device, checkpoint: &Path) -> Result<Self, String> {
@@ -100,10 +160,53 @@ impl<B: Backend> AnyDepthModel<B> {
         ))
     }
 
+    #[cfg(feature = "bpk")]
+    fn load_depth_anything3_burnpack(
+        device: &B::Device,
+        checkpoint: &Path,
+        precision: DepthPrecision,
+    ) -> Result<Self, String> {
+        let checkpoint_hint = checkpoint
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let mut configs = Vec::from([
+            DepthAnything3Config::metric_large(),
+            DepthAnything3Config::small(),
+        ]);
+
+        if checkpoint_hint.contains("small") {
+            configs.swap(0, 1);
+        }
+
+        let mut last_err = None;
+        for config in configs {
+            let mut store = burnpack_load_store(checkpoint, precision);
+            let mut model = depth_anything3::DepthAnything3::new(device, config);
+            let attempt = depth_anything3::with_model_load_stack(|| {
+                model.load_from(&mut store).map(|_| model)
+            });
+            match attempt {
+                Ok(model) => return Ok(Self::DepthAnything3(model)),
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(format!(
+            "Failed to load Depth Anything 3 BurnPack checkpoint `{}`: {}",
+            checkpoint.display(),
+            last_err
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+
     pub fn kind(&self) -> DepthModelKind {
         match self {
             Self::DepthPro(_) => DepthModelKind::DepthPro,
-            Self::DepthAnything3(_) => DepthModelKind::DepthAnything3,
+            Self::DepthAnything3(_) => DepthModelKind::DepthAnything3MetricLarge,
         }
     }
 
@@ -140,6 +243,22 @@ impl<B: Backend> AnyDepthModel<B> {
             }),
             Self::DepthAnything3(model) => prepare_depth_anything3_image(image, model.img_size()),
         }
+    }
+}
+
+fn is_burnpack(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("bpk"))
+}
+
+#[cfg(feature = "bpk")]
+fn burnpack_load_store(checkpoint: &Path, precision: DepthPrecision) -> BurnpackStore {
+    let store = BurnpackStore::from_file(checkpoint).auto_extension(false);
+    if matches!(precision, DepthPrecision::F16) {
+        store.with_from_adapter(HalfPrecisionAdapter::new())
+    } else {
+        store
     }
 }
 

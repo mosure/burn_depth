@@ -4,12 +4,10 @@ use burn::prelude::*;
 use burn_depth::{
     inference::infer_from_rgb,
     model::{
-        depth_anything3::CachedDepthAnything3,
-        prepare_depth_anything3_image,
-        PreparedModelImage,
+        PreparedModelImage, depth_anything3::CachedDepthAnything3, prepare_depth_anything3_image,
     },
 };
-use image::{imageops, RgbImage};
+use image::{RgbImage, imageops};
 
 pub mod platform;
 
@@ -41,12 +39,14 @@ pub async fn process_frame<B: Backend>(
             .min()
             .into_scalar_async()
             .await
+            .expect("failed to read minimum depth")
             .elem::<f32>();
         let max_depth = depth_map
             .clone()
             .max()
             .into_scalar_async()
             .await
+            .expect("failed to read maximum depth")
             .elem::<f32>();
         let range = (max_depth - min_depth).max(f32::EPSILON);
 
@@ -95,18 +95,10 @@ fn prepare_input_frame(
             value
         } else if value >= alignment {
             let rem = value % alignment;
-            if rem == 0 {
-                value
-            } else {
-                value - rem
-            }
+            if rem == 0 { value } else { value - rem }
         } else {
             let rem = value % patch_size;
-            if rem == 0 {
-                value
-            } else {
-                value - rem
-            }
+            if rem == 0 { value } else { value - rem }
         }
     };
 

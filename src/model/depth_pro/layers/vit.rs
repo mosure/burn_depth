@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn dinov2_patch_count_matches_grid() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let (vit, config) = create_vit::<TestBackend>(&device, DINOV2_L16_384);
         let grid = config.grid_size();
 

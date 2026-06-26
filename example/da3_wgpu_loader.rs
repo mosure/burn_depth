@@ -9,7 +9,7 @@ use burn_depth::model::depth_anything3::{
 type WgpuBackend = burn::backend::Wgpu<f32>;
 
 fn main() {
-    let device = <WgpuBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<WgpuBackend>::default();
     let config = DepthAnything3Config::small();
     println!("constructing Depth Anything 3 (wgpu)...");
     println!("loading checkpoint...");

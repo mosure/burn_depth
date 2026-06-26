@@ -151,7 +151,7 @@ mod tests {
     type TestBackend = crate::InferenceBackend;
 
     fn tensor_from_values(
-        device: &<TestBackend as Backend>::Device,
+        device: &burn::tensor::Device<TestBackend>,
         values: &[f32],
         shape: [usize; 4],
     ) -> Tensor<TestBackend, 4> {
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn align_corners_false_outputs_match_expected() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let input = tensor_from_values(&device, &[1.0, 2.0, 3.0, 4.0], [1, 1, 2, 2]);
         let output_size = [4, 4];
 
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn scale_resize_outputs_match_expected() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let input = tensor_from_values(&device, &[4.0, 1.0, 0.0, 2.0], [1, 1, 2, 2]);
         let scale = [1.5, 0.5];
 

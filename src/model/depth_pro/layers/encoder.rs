@@ -307,11 +307,7 @@ impl<B: Backend> DepthProEncoder<B> {
             tokens - spatial_tokens
         };
 
-        let embeddings = embeddings.slice([
-            0..batch,
-            offset..offset + spatial_tokens,
-            0..dim,
-        ]);
+        let embeddings = embeddings.slice([0..batch, offset..offset + spatial_tokens, 0..dim]);
 
         embeddings
             .reshape([batch as i32, height as i32, width as i32, dim as i32])
@@ -466,7 +462,7 @@ mod tests {
     type TestBackend = crate::InferenceBackend;
 
     fn build_encoder(
-        device: &<TestBackend as Backend>::Device,
+        device: &burn::tensor::Device<TestBackend>,
     ) -> (DepthProEncoder<TestBackend>, ViTConfig) {
         let (patch_encoder, patch_config) = create_vit::<TestBackend>(device, DINOV2_L16_128);
         let (image_encoder, image_config) = create_vit::<TestBackend>(device, DINOV2_L16_128);
@@ -487,7 +483,7 @@ mod tests {
     }
 
     fn make_ordered_input(
-        device: &<TestBackend as Backend>::Device,
+        device: &burn::tensor::Device<TestBackend>,
         channels: usize,
         size: usize,
     ) -> Tensor<TestBackend, 4> {
@@ -500,7 +496,7 @@ mod tests {
 
     #[test]
     fn split_merge_roundtrip_without_overlap() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let (encoder, patch_config) = build_encoder(&device);
         let image_size = encoder.img_size();
         let input = make_ordered_input(&device, 3, image_size);
@@ -520,7 +516,7 @@ mod tests {
 
     #[test]
     fn merge_overlapping_layout_matches_expected() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let (encoder, _config) = build_encoder(&device);
 
         let batch_size = 1;

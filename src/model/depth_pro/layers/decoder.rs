@@ -29,7 +29,9 @@ impl<B: Backend> ProjectionConv<B> {
         bias: bool,
     ) -> Self {
         let conv = Conv2dConfig::new(channels, kernel_size)
-            .with_padding(PaddingConfig2d::Explicit(padding, padding))
+            .with_padding(PaddingConfig2d::Explicit(
+                padding, padding, padding, padding,
+            ))
             .with_bias(bias)
             .init(device);
         Self { conv: Some(conv) }
@@ -56,7 +58,7 @@ impl<B: Backend> ResidualBlock<B> {
     fn new(device: &B::Device, num_features: usize, batch_norm: bool) -> Self {
         let conv = |channels_in, channels_out| {
             Conv2dConfig::new([channels_in, channels_out], [3, 3])
-                .with_padding(PaddingConfig2d::Explicit(1, 1))
+                .with_padding(PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .with_bias(!batch_norm)
                 .init(device)
         };

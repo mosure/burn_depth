@@ -84,12 +84,12 @@ fn build_layer_norm_flags(levels: usize, default: bool, custom: Option<&Vec<usiz
     if let Some(indices) = custom
         && !indices.is_empty()
     {
-            flags.fill(false);
-            for &idx in indices {
-                if idx < levels {
-                    flags[idx] = true;
-                }
+        flags.fill(false);
+        for &idx in indices {
+            if idx < levels {
+                flags[idx] = true;
             }
+        }
     }
     flags
 }
@@ -183,7 +183,7 @@ impl<B: Backend> DualDepthAnything3Head<B> {
             ResizeOp::identity(),
             ResizeOp::conv(
                 Conv2dConfig::new([config.out_channels[3], config.out_channels[3]], [3, 3])
-                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                     .with_stride([2, 2])
                     .with_bias(true)
                     .init(device),
@@ -545,7 +545,7 @@ impl<B: Backend> DepthAnything3Head<B> {
             ResizeOp::identity(),
             ResizeOp::conv(
                 Conv2dConfig::new([config.out_channels[3], config.out_channels[3]], [3, 3])
-                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                     .with_stride([2, 2])
                     .with_bias(true)
                     .init(device),
@@ -579,8 +579,7 @@ impl<B: Backend> DepthAnything3Head<B> {
         patch_size: usize,
         cache: &mut PosEmbedCache<B>,
     ) -> Tensor<B, 3> {
-        let activated =
-            self.forward_raw(hooks, height, width, patch_start_idx, patch_size, cache);
+        let activated = self.forward_raw(hooks, height, width, patch_start_idx, patch_size, cache);
         self.select_depth_channel(activated)
     }
 
@@ -820,8 +819,12 @@ impl<B: Backend> PosEmbedCache<B> {
                 key.image_width,
                 key.image_height,
             );
-            Tensor::<B, 1>::from_floats(embedding.as_slice(), &device)
-                .reshape([1, key.channels as i32, key.height as i32, key.width as i32])
+            Tensor::<B, 1>::from_floats(embedding.as_slice(), &device).reshape([
+                1,
+                key.channels as i32,
+                key.height as i32,
+                key.width as i32,
+            ])
         });
         let expanded = cached.clone().expand(tensor.shape());
         tensor + expanded.mul_scalar(POS_EMBED_RATIO)
@@ -1065,7 +1068,7 @@ impl<B: Backend> Scratch<B> {
             refinenet3,
             refinenet4,
             output_conv1: Conv2dConfig::new([base_features, base_features / 2], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+                .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .with_bias(true)
                 .init(device),
             output_conv2: ConvStack::new(device, base_features / 2, output_dim, 32),
@@ -1093,7 +1096,7 @@ impl<B: Backend> AuxPreHead<B> {
             let out_ch = if idx % 2 == 0 { channels / 2 } else { channels };
             layers.push(
                 Conv2dConfig::new([in_ch, out_ch], [3, 3])
-                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+                    .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                     .with_bias(true)
                     .init(device),
             );
@@ -1156,7 +1159,7 @@ impl<B: Backend> AuxOutputHead<B> {
         use_layer_norm: bool,
     ) -> Self {
         let reduce = Conv2dConfig::new([in_channels, mid_channels], [3, 3])
-            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
             .with_bias(true)
             .init(device);
         let norm = if use_layer_norm {
@@ -1237,7 +1240,7 @@ impl<B: Backend> ResidualConvUnit<B> {
     fn new(device: &B::Device, channels: usize) -> Self {
         let conv = |in_ch, out_ch| {
             Conv2dConfig::new([in_ch, out_ch], [3, 3])
-                .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+                .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
                 .with_bias(true)
                 .init(device)
         };
@@ -1269,7 +1272,7 @@ impl<B: Backend> ConvStack<B> {
         mid_channels: usize,
     ) -> Self {
         let conv1 = Conv2dConfig::new([in_channels, mid_channels], [3, 3])
-            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
             .with_bias(true)
             .init(device);
         let conv2 = Conv2dConfig::new([mid_channels, out_channels], [1, 1])
@@ -1286,7 +1289,7 @@ impl<B: Backend> ConvStack<B> {
 
 fn conv3x3<B: Backend>(device: &B::Device, in_channels: usize, out_channels: usize) -> Conv2d<B> {
     Conv2dConfig::new([in_channels, out_channels], [3, 3])
-        .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+        .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
         .with_bias(false)
         .init(device)
 }

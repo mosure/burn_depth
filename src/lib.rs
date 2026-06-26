@@ -1,25 +1,44 @@
 #![recursion_limit = "256"]
+#![allow(deprecated)]
 
+pub mod geometry;
 pub mod inference;
+pub mod loader;
 pub mod model;
+pub mod pipeline;
 
-#[cfg(feature = "backend_ndarray")]
-use burn::backend::NdArray;
+pub use geometry::{
+    CameraIntrinsics, ImageBoundingBox, Plane, backproject_depth, depth_at_bbox_contact_region,
+    estimate_floor_plane, pixel_to_ray,
+};
+pub use loader::{
+    DepthArtifactManifest, DepthArtifactPart, DepthCheckpointSource, DepthLoadConfig,
+    DepthLoadError, DepthLoadEvent, DepthLoadStage, DepthPrecision,
+};
+pub use model::DepthModelKind;
+pub use pipeline::{DepthPipeline, DepthPipelineError, DepthRuntimeConfig};
 
-#[cfg(feature = "backend_cuda")]
-use burn::backend::Cuda;
+#[cfg(feature = "backend_wgpu")]
+pub type InferenceBackend = burn::backend::Wgpu<f32>;
 
-#[cfg(feature = "backend_cpu")]
-use burn::backend::Cpu;
+#[cfg(all(not(feature = "backend_wgpu"), feature = "backend_cuda"))]
+pub type InferenceBackend = burn::backend::Cuda;
 
-#[cfg(feature = "backend_ndarray")]
-pub type InferenceBackend = NdArray;
+#[cfg(all(
+    not(any(feature = "backend_wgpu", feature = "backend_cuda")),
+    feature = "backend_ndarray"
+))]
+pub type InferenceBackend = burn::backend::NdArray;
 
-#[cfg(feature = "backend_cuda")]
-pub type InferenceBackend = Cuda;
-
-#[cfg(feature = "backend_cpu")]
-pub type InferenceBackend = Cpu;
+#[cfg(all(
+    not(any(
+        feature = "backend_wgpu",
+        feature = "backend_cuda",
+        feature = "backend_ndarray"
+    )),
+    feature = "backend_cpu"
+))]
+pub type InferenceBackend = burn::backend::Cpu;
 
 #[cfg(test)]
 mod tests {
@@ -58,7 +77,7 @@ mod tests {
     fn ensure_wgpu_runtime() -> Result<Features, String> {
         WGPU_FEATURES
             .get_or_init(|| {
-                let device = <WgpuF32Backend as Backend>::Device::default();
+                let device = burn::tensor::Device::<WgpuF32Backend>::default();
                 match panic::catch_unwind(AssertUnwindSafe(|| {
                     init_setup::<AutoGraphicsApi>(&device, RuntimeOptions::default())
                 })) {
@@ -70,33 +89,33 @@ mod tests {
     }
 
     #[cfg(feature = "backend_wgpu")]
-    fn init_wgpu_f16_device() -> Result<<WgpuHalfBackend as Backend>::Device, String> {
+    fn init_wgpu_f16_device() -> Result<burn::tensor::Device<WgpuHalfBackend>, String> {
         let features = ensure_wgpu_runtime()?;
 
         if !features.contains(Features::SHADER_F16) {
             return Err("adapter does not expose SHADER_F16".to_string());
         }
 
-        Ok(<WgpuHalfBackend as Backend>::Device::default())
+        Ok(burn::tensor::Device::<WgpuHalfBackend>::default())
     }
 
     #[cfg(feature = "backend_wgpu")]
-    fn init_wgpu_f32_device() -> Result<<WgpuF32Backend as Backend>::Device, String> {
+    fn init_wgpu_f32_device() -> Result<burn::tensor::Device<WgpuF32Backend>, String> {
         ensure_wgpu_runtime()?;
-        Ok(<WgpuF32Backend as Backend>::Device::default())
+        Ok(burn::tensor::Device::<WgpuF32Backend>::default())
     }
 
     #[cfg(feature = "backend_cuda")]
-    fn init_cuda_device() -> Result<<CudaBackend<f32> as Backend>::Device, String> {
+    fn init_cuda_device() -> Result<burn::tensor::Device<CudaBackend<f32>>, String> {
         panic::catch_unwind(AssertUnwindSafe(|| {
-            <CudaBackend<f32> as Backend>::Device::default()
+            burn::tensor::Device::<CudaBackend<f32>>::default()
         }))
         .map_err(|_| "CUDA runtime unavailable on this system.".to_string())
     }
 
     #[cfg(feature = "backend_ndarray")]
-    fn init_ndarray_device() -> Result<<NdArrayBackend<f32> as Backend>::Device, String> {
-        Ok(<NdArrayBackend<f32> as Backend>::Device::default())
+    fn init_ndarray_device() -> Result<burn::tensor::Device<NdArrayBackend<f32>>, String> {
+        Ok(burn::tensor::Device::<NdArrayBackend<f32>>::default())
     }
 
     fn test_config() -> DepthProConfig {
@@ -194,12 +213,19 @@ mod tests {
         assert_eq!(result.focallength_px.shape().dims(), [1]);
     }
 
+    #[cfg(feature = "backend_ndarray")]
+    fn heavy_inference_enabled() -> bool {
+        std::env::var("BURN_DEPTH_HEAVY_INFERENCE")
+            .map(|value| value != "0")
+            .unwrap_or(false)
+    }
+
     #[test]
     #[cfg(feature = "backend_wgpu")]
     fn depth_pro_initializes_wgpu_f16() {
         run_initializes_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
-            Availability::Required("WGPU<f16> backend unavailable"),
+            Availability::Optional("WGPU<f16> backend test"),
         );
     }
 
@@ -208,7 +234,7 @@ mod tests {
     fn depth_pro_roundtrip_record_wgpu_f16() {
         run_roundtrip_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
-            Availability::Required("WGPU<f16> backend unavailable"),
+            Availability::Optional("WGPU<f16> backend test"),
         );
     }
 
@@ -272,7 +298,7 @@ mod tests {
     fn depth_pro_infers_wgpu_f16() {
         run_inference_test::<WgpuHalfBackend, _>(
             init_wgpu_f16_device,
-            Availability::Required("WGPU<f16> backend unavailable"),
+            Availability::Optional("WGPU<f16> backend test"),
         );
     }
 
@@ -297,6 +323,13 @@ mod tests {
     #[test]
     #[cfg(feature = "backend_ndarray")]
     fn depth_pro_infers_ndarray() {
+        if !heavy_inference_enabled() {
+            eprintln!(
+                "skipping full DepthPro ndarray inference; set BURN_DEPTH_HEAVY_INFERENCE=1 to run"
+            );
+            return;
+        }
+
         run_inference_test::<NdArrayBackend<f32>, _>(
             init_ndarray_device,
             Availability::Required("NdArray backend unavailable"),

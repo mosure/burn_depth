@@ -1,21 +1,50 @@
 use burn::prelude::*;
 
-use crate::model::{
-    AnyDepthModel,
-    depth_anything3::{CachedDepthAnything3, DepthAnything3},
-    depth_pro::{DepthPro, DepthProInference},
+use crate::{
+    geometry::CameraIntrinsics,
+    model::{
+        AnyDepthModel, DepthModelKind,
+        depth_anything3::{CachedDepthAnything3, DepthAnything3},
+        depth_pro::{DepthPro, DepthProInference},
+    },
 };
 
 #[derive(Debug, Clone)]
 pub struct DepthPrediction<B: Backend> {
+    pub depth_m: Tensor<B, 3>,
     pub depth: Tensor<B, 3>,
     pub focallength_px: Option<Tensor<B, 1>>,
     pub fovy_rad: Option<Tensor<B, 1>>,
+    pub intrinsics: Option<CameraIntrinsics>,
+    pub metadata: DepthPredictionMetadata,
+}
+
+#[derive(Debug, Clone)]
+pub struct DepthPredictionMetadata {
+    pub model: DepthModelKind,
+    pub metric_depth: bool,
+    pub relative_depth: bool,
+    pub output_size: Option<(u32, u32)>,
+    pub returned_gpu_tensors: bool,
+    pub warnings: Vec<String>,
+}
+
+impl DepthPredictionMetadata {
+    pub fn metric(model: DepthModelKind) -> Self {
+        Self {
+            model,
+            metric_depth: true,
+            relative_depth: false,
+            output_size: None,
+            returned_gpu_tensors: false,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 impl<B: Backend> DepthPrediction<B> {
     pub fn has_intrinsics(&self) -> bool {
-        self.focallength_px.is_some() || self.fovy_rad.is_some()
+        self.intrinsics.is_some() || self.focallength_px.is_some() || self.fovy_rad.is_some()
     }
 }
 
@@ -25,10 +54,14 @@ pub trait DepthModel<B: Backend> {
 
 impl<B: Backend> From<DepthProInference<B>> for DepthPrediction<B> {
     fn from(value: DepthProInference<B>) -> Self {
+        let depth = value.depth;
         Self {
-            depth: value.depth,
+            depth_m: depth.clone(),
+            depth,
             focallength_px: Some(value.focallength_px),
             fovy_rad: Some(value.fovy_rad),
+            intrinsics: None,
+            metadata: DepthPredictionMetadata::metric(DepthModelKind::DepthPro),
         }
     }
 }
@@ -42,10 +75,14 @@ impl<B: Backend> DepthModel<B> for DepthPro<B> {
 impl<B: Backend> DepthModel<B> for DepthAnything3<B> {
     fn infer_depth(&self, input: Tensor<B, 4>) -> DepthPrediction<B> {
         let result = self.infer(input);
+        let depth = result.depth;
         DepthPrediction {
-            depth: result.depth,
+            depth_m: depth.clone(),
+            depth,
             focallength_px: None,
             fovy_rad: None,
+            intrinsics: None,
+            metadata: DepthPredictionMetadata::metric(DepthModelKind::DepthAnything3MetricLarge),
         }
     }
 }
@@ -53,10 +90,14 @@ impl<B: Backend> DepthModel<B> for DepthAnything3<B> {
 impl<B: Backend> DepthModel<B> for CachedDepthAnything3<B> {
     fn infer_depth(&self, input: Tensor<B, 4>) -> DepthPrediction<B> {
         let result = self.infer(input);
+        let depth = result.depth;
         DepthPrediction {
-            depth: result.depth,
+            depth_m: depth.clone(),
+            depth,
             focallength_px: None,
             fovy_rad: None,
+            intrinsics: None,
+            metadata: DepthPredictionMetadata::metric(DepthModelKind::DepthAnything3MetricLarge),
         }
     }
 }
@@ -144,7 +185,7 @@ mod tests {
 
     #[test]
     fn rgb_to_input_tensor_normalizes_channels() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let rgb = vec![
             0u8, 255, 128, //
             255, 0, 128,
@@ -156,12 +197,7 @@ mod tests {
 
         // Expected values computed using f32 precision to align with PyTorch's normalization.
         let expected = [
-            -2.1179039,
-            2.2489083,
-            2.4285715,
-            -2.0357141,
-            0.42649257,
-            0.42649257,
+            -2.1179039, 2.2489083, 2.4285715, -2.0357141, 0.42649257, 0.42649257,
         ];
         assert_eq!(values.len(), expected.len());
         for (value, expected) in values.iter().zip(expected.iter()) {
@@ -174,7 +210,7 @@ mod tests {
 
     #[test]
     fn rgb_to_input_tensor_rejects_invalid_length() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let rgb = vec![0u8; 5];
         let result = rgb_to_input_tensor::<TestBackend>(&rgb, 1, 2, &device);
         assert!(result.is_err());

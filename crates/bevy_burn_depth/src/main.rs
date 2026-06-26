@@ -15,22 +15,21 @@ use bevy::{
     ecs::world::CommandQueue,
     prelude::*,
     render::{
-        RenderPlugin,
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
         settings::{RenderCreation, WgpuFeatures, WgpuSettings},
+        RenderPlugin,
     },
-    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
+    tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
     ui::widget::ImageNode,
 };
-use bevy_args::{Deserialize, Parser, Serialize, parse_args};
+use bevy_args::{parse_args, Deserialize, Parser, Serialize};
 use bevy_burn::{BevyBurnBridgePlugin, BevyBurnHandle, BindingDirection, BurnDevice, TransferKind};
 use bevy_burn_depth::{platform::camera::receive_image, process_frame};
 use burn::prelude::*;
-use burn_depth::model::depth_anything3::{
-    CachedDepthAnything3, DepthAnything3Config,
-};
-use burn_wgpu::Wgpu;
+use burn_depth::model::depth_anything3::{CachedDepthAnything3, DepthAnything3Config};
 use image::RgbImage;
+
+type Wgpu = burn::backend::Wgpu<f32>;
 
 const DEFAULT_CHECKPOINT: &str = "assets/model/da3_small.mpk";
 const MAX_IN_FLIGHT_TASKS: usize = 1;
@@ -75,8 +74,12 @@ mod io {
         prelude::*,
         record::{HalfPrecisionSettings, NamedMpkFileRecorder},
     };
-    use burn_depth::model::depth_anything3::{
-        DepthAnything3, DepthAnything3Config, with_model_load_stack,
+    use burn_depth::{
+        model::{
+            depth_anything3::{with_model_load_stack, DepthAnything3, DepthAnything3Config},
+            AnyDepthModel,
+        },
+        DepthModelKind, DepthPrecision,
     };
 
     pub async fn load_model<B: Backend>(
@@ -84,6 +87,33 @@ mod io {
         checkpoint: &Path,
         device: &B::Device,
     ) -> DepthAnything3<B> {
+        if checkpoint
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bpk"))
+        {
+            let precision = checkpoint
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .filter(|stem| stem.to_ascii_lowercase().contains("f16"))
+                .map(|_| DepthPrecision::F16)
+                .unwrap_or(DepthPrecision::F32);
+
+            return match AnyDepthModel::load_with_precision(
+                DepthModelKind::DepthAnything3MetricLarge,
+                device,
+                checkpoint,
+                precision,
+            )
+            .expect("failed to load Depth Anything 3 BurnPack checkpoint")
+            {
+                AnyDepthModel::DepthAnything3(model) => model,
+                AnyDepthModel::DepthPro(_) => {
+                    panic!("DepthPro checkpoint cannot be loaded by bevy_burn_depth")
+                }
+            };
+        }
+
         let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
         with_model_load_stack(|| {
             DepthAnything3::new(device, config).load_file(checkpoint, &recorder, device)
@@ -99,12 +129,12 @@ mod io {
         record::{HalfPrecisionSettings, NamedMpkBytesRecorder, Recorder},
     };
     use burn_depth::model::depth_anything3::{
-        DepthAnything3, DepthAnything3Config, with_model_load_stack,
+        with_model_load_stack, DepthAnything3, DepthAnything3Config,
     };
     use js_sys::Uint8Array;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{Request, RequestInit, RequestMode, Response, window};
+    use web_sys::{window, Request, RequestInit, RequestMode, Response};
 
     pub async fn load_model<B: Backend>(
         config: DepthAnything3Config,
@@ -355,7 +385,7 @@ fn begin_depth_model_load(
 fn spawn_depth_model_load_task(
     config: DepthAnything3Config,
     checkpoint: PathBuf,
-    device: <Wgpu as Backend>::Device,
+    device: burn::tensor::Device<Wgpu>,
 ) -> Task<DepthModelLoadResult> {
     AsyncComputeTaskPool::get().spawn(async move {
         log("begin load_model task (native)...");
@@ -373,7 +403,7 @@ fn spawn_depth_model_load_task(
 fn spawn_depth_model_load_task(
     config: DepthAnything3Config,
     checkpoint: PathBuf,
-    device: <Wgpu as Backend>::Device,
+    device: burn::tensor::Device<Wgpu>,
 ) -> Task<DepthModelLoadResult> {
     let checkpoint = normalize_web_checkpoint(&checkpoint);
     AsyncComputeTaskPool::get().spawn(async move {
@@ -559,10 +589,10 @@ pub fn viewer_app(args: BevyBurnDepthConfig) -> App {
     let default_plugins = DefaultPlugins
         .set(ImagePlugin::default_nearest())
         .set(RenderPlugin {
-            render_creation: RenderCreation::Automatic(WgpuSettings {
+            render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
                 features: WgpuFeatures::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
                 ..Default::default()
-            }),
+            })),
             ..Default::default()
         })
         .set(WindowPlugin {
@@ -600,7 +630,7 @@ fn fps_display_setup(mut commands: Commands) {
         .spawn((
             Text("fps: ".to_string()),
             TextFont {
-                font_size: 60.0,
+                font_size: FontSize::Px(60.0),
                 ..Default::default()
             },
             TextColor(Color::WHITE),
@@ -616,7 +646,7 @@ fn fps_display_setup(mut commands: Commands) {
             FpsText,
             TextColor(Color::Srgba(GOLD)),
             TextFont {
-                font_size: 60.0,
+                font_size: FontSize::Px(60.0),
                 ..Default::default()
             },
             TextSpan::default(),

@@ -76,14 +76,14 @@ struct DepthHead<B: Backend> {
 impl<B: Backend> DepthHead<B> {
     fn new(device: &B::Device, dim_decoder: usize, last_dims: (usize, usize)) -> Self {
         let conv0 = Conv2dConfig::new([dim_decoder, dim_decoder / 2], [3, 3])
-            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
             .init(device);
         let deconv = ConvTranspose2dConfig::new([dim_decoder / 2, dim_decoder / 2], [2, 2])
             .with_stride([2, 2])
             .with_bias(true)
             .init(device);
         let conv1 = Conv2dConfig::new([dim_decoder / 2, last_dims.0], [3, 3])
-            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1))
+            .with_padding(burn::nn::PaddingConfig2d::Explicit(1, 1, 1, 1))
             .init(device);
         let mut conv_out = Conv2dConfig::new([last_dims.0, last_dims.1], [1, 1])
             .with_bias(true)
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn interpolation_method_matches_configuration() {
-        let device = <TestBackend as Backend>::Device::default();
+        let device = burn::tensor::Device::<TestBackend>::default();
         let custom_model =
             DepthPro::<TestBackend>::new(&device, small_config(InterpolationMethod::Custom));
         let burn_model =

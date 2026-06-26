@@ -1,16 +1,14 @@
 use std::path::PathBuf;
 
-use burn::{
-    backend::NdArray,
-    module::Module,
-    record::{HalfPrecisionSettings, NamedMpkFileRecorder},
-    tensor::backend::Backend,
-};
+use burn::{backend::NdArray, tensor::backend::Backend};
 use burn_depth::model::depth_anything3::{DepthAnything3, DepthAnything3Config};
 use burn_store::{
     ApplyResult, KeyRemapper, ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore,
 };
 use clap::{Parser, ValueEnum};
+
+mod import_common;
+use import_common::{ImportPrecision, maybe_write_shards, save_import_artifact};
 
 type ImportBackend = NdArray<f32>;
 
@@ -30,6 +28,15 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
 
+    #[arg(long, value_enum, default_value_t = ImportPrecision::F16)]
+    precision: ImportPrecision,
+
+    #[arg(long, value_name = "MB")]
+    shard_size_mb: Option<u64>,
+
+    #[arg(long, value_name = "REF")]
+    source_upstream: Option<String>,
+
     #[arg(long, value_name = "BOOL", default_value_t = false)]
     dry_run: bool,
 
@@ -42,13 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint = args
         .checkpoint
         .unwrap_or_else(|| args.variant.default_checkpoint());
-    let output = args.output.unwrap_or_else(|| args.variant.default_output());
+    let output = args
+        .output
+        .unwrap_or_else(|| args.variant.default_output(args.precision));
 
     if !checkpoint.exists() {
         return Err(format!("Checkpoint `{}` not found.", checkpoint.display()).into());
     }
 
-    let device = <ImportBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<ImportBackend>::default();
     let config = args.variant.config();
     let mut model = DepthAnything3::<ImportBackend>::new(&device, config.clone());
     let head_prefix = if config.head.dual_head {
@@ -210,11 +219,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let recorder = NamedMpkFileRecorder::<HalfPrecisionSettings>::new();
-    model
-        .save_file(output.clone(), &recorder)
+    let tensor_count = model.collect(None, None, false).len();
+    save_import_artifact::<ImportBackend, _>(&model, &output, args.precision)
         .map_err(|err| format!("Failed to save checkpoint: {err}"))?;
     println!("Saved Burn checkpoint to {}", output.display());
+
+    if let Some(manifest) = maybe_write_shards(
+        &output,
+        args.shard_size_mb,
+        args.variant.model_id(),
+        "depth-anything-3",
+        args.precision,
+        &checkpoint,
+        args.source_upstream.as_deref(),
+        tensor_count,
+    )? {
+        println!("Wrote sharded manifest to {}", manifest.display());
+    }
     Ok(())
 }
 
@@ -239,10 +260,23 @@ impl ModelVariant {
         }
     }
 
-    fn default_output(self) -> PathBuf {
+    fn default_output(self, precision: ImportPrecision) -> PathBuf {
+        let suffix = match precision {
+            ImportPrecision::F32 => "",
+            ImportPrecision::F16 => "_f16",
+        };
         match self {
-            ModelVariant::MetricLarge => PathBuf::from("assets/model/da3_metric_large.mpk"),
-            ModelVariant::Small => PathBuf::from("assets/model/da3_small.mpk"),
+            ModelVariant::MetricLarge => {
+                PathBuf::from(format!("models/da3/da3_metric_large{suffix}.bpk"))
+            }
+            ModelVariant::Small => PathBuf::from(format!("models/da3/da3_small{suffix}.bpk")),
+        }
+    }
+
+    fn model_id(self) -> &'static str {
+        match self {
+            ModelVariant::MetricLarge => "da3_metric_large",
+            ModelVariant::Small => "da3_small",
         }
     }
 }
@@ -256,8 +290,8 @@ fn report_result(result: &ApplyResult) {
         result.unused.len()
     );
     if !result.missing.is_empty() {
-        for key in &result.missing {
-            println!("Missing tensor: {key}");
+        for (key, container) in &result.missing {
+            println!("Missing tensor: {key} ({container})");
         }
     }
     if !result.unused.is_empty() {
@@ -273,7 +307,7 @@ fn export_template<B: Backend>(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut paths: Vec<String> = model
         .clone()
-        .collect(None, None)
+        .collect(None, None, false)
         .into_iter()
         .map(|snapshot| snapshot.full_path())
         .collect();

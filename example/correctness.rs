@@ -265,7 +265,7 @@ fn tensor_to_feature(
 
 fn feature_tensor_to_tensor(
     feature: &FeatureTensor,
-    device: &<InferenceBackend as Backend>::Device,
+    device: &burn::tensor::Device<InferenceBackend>,
 ) -> Result<Tensor<InferenceBackend, 4>, Box<dyn std::error::Error>> {
     let dims: [usize; 4] = feature
         .shape
@@ -288,7 +288,7 @@ fn compute_burn_outputs(
     image_path: &Path,
     checkpoint_path: &Path,
 ) -> Result<BurnOutputs, Box<dyn std::error::Error>> {
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
 
     if !checkpoint_path.exists() {
         return Err(format!(
@@ -540,7 +540,7 @@ fn compare_decoder_with_reference(
         return Ok(());
     }
 
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
     let checkpoint = Path::new("assets/model/depth_pro.mpk");
 
     let model = DepthPro::<InferenceBackend>::load(&device, checkpoint)
@@ -965,7 +965,7 @@ fn compute_da3_outputs(
     checkpoint_path: &Path,
     dump_input: bool,
 ) -> Result<Da3Outputs, Box<dyn std::error::Error>> {
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
     if !checkpoint_path.exists() {
         return Err(format!(
             "DA3 Burn checkpoint `{}` missing. Run the importer first.",

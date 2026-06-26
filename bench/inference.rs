@@ -19,7 +19,7 @@ criterion_group! {
 criterion_main!(depth_pro_benchmarks);
 
 fn inference_benchmark(c: &mut Criterion) {
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
     let bench_device = device.clone();
 
     let depth_pro = DepthPro::<InferenceBackend>::new(&device, DepthProConfig::default());
@@ -43,21 +43,21 @@ fn inference_benchmark(c: &mut Criterion) {
     group.bench_function("depth_pro_infer", |b| {
         b.iter(|| {
             let output = depth_pro.infer(pro_input.clone());
-            InferenceBackend::sync(&bench_device);
+            let _ = InferenceBackend::sync(&bench_device);
             black_box(output);
         });
     });
     group.bench_function("depth_anything3_metric_large_infer", |b| {
         b.iter(|| {
             let output = depth_anything_large.infer(da3_large_input.clone());
-            InferenceBackend::sync(&bench_device);
+            let _ = InferenceBackend::sync(&bench_device);
             black_box(output);
         });
     });
     group.bench_function("depth_anything3_small_infer", |b| {
         b.iter(|| {
             let output = depth_anything_small.infer(da3_small_input.clone());
-            InferenceBackend::sync(&bench_device);
+            let _ = InferenceBackend::sync(&bench_device);
             black_box(output);
         });
     });

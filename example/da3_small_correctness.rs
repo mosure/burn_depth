@@ -466,7 +466,7 @@ fn tensor3_to_vec(tensor: &Tensor<NdBackend, 3>) -> (Vec<f32>, Vec<usize>) {
     let values = data
         .to_vec::<f32>()
         .expect("failed to read backbone tensor values");
-    (values, shape)
+    (values, shape.to_vec())
 }
 
 fn tensor4_to_vec(tensor: &Tensor<NdBackend, 4>) -> (Vec<f32>, Vec<usize>) {
@@ -475,7 +475,7 @@ fn tensor4_to_vec(tensor: &Tensor<NdBackend, 4>) -> (Vec<f32>, Vec<usize>) {
     let values = data
         .to_vec::<f32>()
         .expect("failed to read aux tensor values");
-    (values, shape)
+    (values, shape.to_vec())
 }
 
 fn analyze_aux_stage_necks(

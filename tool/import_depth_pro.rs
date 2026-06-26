@@ -6,32 +6,65 @@ use std::{
 
 use burn::{
     module::Module,
-    record::{HalfPrecisionSettings, NamedMpkFileRecorder, Record},
+    record::{HalfPrecisionSettings, Record},
 };
 use burn_depth::model::depth_pro::{DepthPro, DepthProConfig};
 use burn_store::{
     ApplyResult, ModuleSnapshot, TensorSnapshot,
     pytorch::{PytorchReader, PytorchStore},
 };
+use clap::Parser;
 use serde_json::Value;
+
+mod import_common;
+use import_common::{ImportPrecision, maybe_write_shards, save_import_artifact};
 
 type Backend = burn::backend::NdArray<f32>;
 
 const CHECKPOINT_PATH: &str = "assets/model/depth_pro.pt";
-const OUTPUT_PATH: &str = "assets/model/depth_pro.mpk";
 const TEMPLATE_PATH: &str = "assets/model/depth_pro_template_paths.txt";
 
+#[derive(Parser, Debug)]
+#[command(
+    author,
+    version,
+    about = "Convert Depth Pro PyTorch weights into Burn checkpoints"
+)]
+struct Args {
+    #[arg(long, value_name = "PATH", default_value = CHECKPOINT_PATH)]
+    checkpoint: PathBuf,
+
+    #[arg(long, value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = ImportPrecision::F32)]
+    precision: ImportPrecision,
+
+    #[arg(long, value_name = "MB")]
+    shard_size_mb: Option<u64>,
+
+    #[arg(long, value_name = "REF")]
+    source_upstream: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
+
+    #[arg(long, default_value_t = false)]
+    dump_template: bool,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let device = <Backend as burn::tensor::backend::Backend>::Device::default();
+    let args = Args::parse();
+    let device = burn::tensor::Device::<Backend>::default();
     let mut model = DepthPro::<Backend>::new(&device, DepthProConfig::default());
 
-    if std::env::var("EXPORT_TEMPLATE").is_ok() {
+    if args.dump_template || std::env::var("EXPORT_TEMPLATE").is_ok() {
         dump_template(model.clone())?;
         return Ok(());
     }
 
     let debug = std::env::var("IMPORT_DEBUG").is_ok();
-    let checkpoint_path = PathBuf::from(CHECKPOINT_PATH);
+    let checkpoint_path = args.checkpoint;
     if !checkpoint_path.exists() {
         return Err(format!(
             "PyTorch checkpoint `{}` not found.",
@@ -57,14 +90,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         validate_against_reference(&model, &checkpoint_path)?;
     }
 
-    let output_path = PathBuf::from(OUTPUT_PATH);
-    model.clone().save_file(
-        output_path.clone(),
-        &NamedMpkFileRecorder::<HalfPrecisionSettings>::new(),
-    )?;
+    if args.dry_run {
+        println!("Dry run enabled; checkpoint not written.");
+        return Ok(());
+    }
 
+    let output_path = args
+        .output
+        .unwrap_or_else(|| default_output(args.precision));
+    let tensor_count = model.collect(None, None, false).len();
+    save_import_artifact::<Backend, _>(&model, &output_path, args.precision)?;
     println!("Saved Burn checkpoint to {}", output_path.display());
+
+    if let Some(manifest) = maybe_write_shards(
+        &output_path,
+        args.shard_size_mb,
+        "depth_pro",
+        "depth-pro",
+        args.precision,
+        &checkpoint_path,
+        args.source_upstream.as_deref(),
+        tensor_count,
+    )? {
+        println!("Wrote sharded manifest to {}", manifest.display());
+    }
     Ok(())
+}
+
+fn default_output(precision: ImportPrecision) -> PathBuf {
+    match precision {
+        ImportPrecision::F32 => PathBuf::from("models/depth-pro/depth_pro.bpk"),
+        ImportPrecision::F16 => PathBuf::from("models/depth-pro/depth_pro_f16.bpk"),
+    }
 }
 
 fn dump_template(model: DepthPro<Backend>) -> Result<(), Box<dyn std::error::Error>> {
@@ -146,7 +203,7 @@ fn validate_against_reference(
 
     use burn::tensor::Tensor;
 
-    let device = <Backend as burn::tensor::backend::Backend>::Device::default();
+    let device = burn::tensor::Device::<Backend>::default();
     let reference_bytes = std::fs::read("assets/image/test.safetensors")?;
     let tensors = SafeTensors::deserialize(&reference_bytes)?;
     let load_tensor = |name: &str| -> Result<Vec<f32>, Box<dyn std::error::Error>> {
@@ -230,7 +287,7 @@ fn validate_against_reference(
         std::any::type_name_of_val(&record.encoder.upsample_lowres.weight)
     );
 
-    let mut collector = burn_store::Collector::new(None, None);
+    let mut collector = burn_store::Collector::new(None, None, false);
     model.visit(&mut collector);
     let tensors = collector.into_tensors();
     println!("[IMPORT_VALIDATE] Sample decoder.convs tensors:");
@@ -460,10 +517,10 @@ fn report_apply_result(
     }
 
     let allowed: HashSet<&str> = allowed_missing().iter().copied().collect();
-    let unexpected: Vec<&String> = result
+    let unexpected: Vec<&(String, String)> = result
         .missing
         .iter()
-        .filter(|key| !allowed.contains(key.as_str()))
+        .filter(|(key, _)| !allowed.contains(key.as_str()))
         .collect();
 
     if !unexpected.is_empty() {
@@ -471,8 +528,8 @@ fn report_apply_result(
             "Missing tensors not covered by the importer allowlist ({}):",
             unexpected.len()
         );
-        for key in &unexpected {
-            println!("  - {}", key);
+        for missing in &unexpected {
+            println!("  - {} ({})", missing.0, missing.1);
         }
         return Err("Unexpected missing tensors encountered while importing.".into());
     }
@@ -482,8 +539,8 @@ fn report_apply_result(
             "Warning: {} tensor(s) absent from checkpoint; default initialization retained.",
             result.missing.len()
         );
-        for key in &result.missing {
-            println!("  - {}", key);
+        for (key, container) in &result.missing {
+            println!("  - {key} ({container})");
         }
     }
 
@@ -519,7 +576,7 @@ fn report_apply_result(
 
 fn debug_print_model_paths(model: &DepthPro<Backend>) {
     let mut paths: Vec<String> = model
-        .collect(None, None)
+        .collect(None, None, false)
         .into_iter()
         .map(|snapshot| snapshot.full_path())
         .filter(|path| path.starts_with("fov"))

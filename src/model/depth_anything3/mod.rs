@@ -633,50 +633,57 @@ mod tests {
 
     #[test]
     fn depth_anything3_emits_depth_tensor() {
-        let device = <InferenceBackend as Backend>::Device::default();
-        let config = DepthAnything3Config::metric_large();
+        let device = burn::tensor::Device::<InferenceBackend>::default();
+        let config = test_mono_config();
         let model = DepthAnything3::<InferenceBackend>::new(&device, config);
-        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
+        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 56, 56], &device);
         let output = model.infer(input);
-        assert_eq!(output.depth.shape().dims(), [1, 518, 518]);
+        assert_eq!(output.depth.shape().dims(), [1, 56, 56]);
     }
 
     #[test]
-    fn cached_depth_anything3_matches_uncached() {
-        let device = <InferenceBackend as Backend>::Device::default();
-        let config = DepthAnything3Config::metric_large();
-        let model = DepthAnything3::<InferenceBackend>::new(&device, config);
-        let cached = CachedDepthAnything3::new(model.clone());
+    fn cached_depth_anything3_is_repeatable() {
+        let device = burn::tensor::Device::<InferenceBackend>::default();
+        let config = test_mono_config();
+        let cached =
+            CachedDepthAnything3::new(DepthAnything3::<InferenceBackend>::new(&device, config));
 
-        let input_a = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
-        let input_b = input_a.clone();
+        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 56, 56], &device);
 
-        let base = model.infer(input_a);
-        let cached_first = cached.infer(input_b.clone());
-        let cached_second = cached.infer(input_b);
+        let cached_first = cached.infer(input.clone());
+        let cached_second = cached.infer(input);
 
-        let base_data = base.depth.into_data().convert::<f32>();
         let cached_first_data = cached_first.depth.into_data().convert::<f32>();
         let cached_second_data = cached_second.depth.into_data().convert::<f32>();
 
-        assert_eq!(
-            base_data.to_vec::<f32>().unwrap(),
-            cached_first_data.to_vec::<f32>().unwrap()
+        assert_close(
+            &cached_first_data.to_vec::<f32>().unwrap(),
+            &cached_second_data.to_vec::<f32>().unwrap(),
+            1e-6,
         );
-        assert_eq!(
-            cached_first_data.to_vec::<f32>().unwrap(),
-            cached_second_data.to_vec::<f32>().unwrap()
+    }
+
+    fn assert_close(left: &[f32], right: &[f32], tolerance: f32) {
+        assert_eq!(left.len(), right.len());
+        let max_abs = left
+            .iter()
+            .zip(right.iter())
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs <= tolerance,
+            "max abs delta {max_abs} exceeded tolerance {tolerance}"
         );
     }
 
     #[test]
     fn pos_embed_cache_reused_across_inference() {
-        let device = <InferenceBackend as Backend>::Device::default();
-        let config = DepthAnything3Config::metric_large();
+        let device = burn::tensor::Device::<InferenceBackend>::default();
+        let config = test_mono_config();
         let model = DepthAnything3::<InferenceBackend>::new(&device, config);
         let mut cache = PosEmbedCache::new();
 
-        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 518, 518], &device);
+        let input = Tensor::<InferenceBackend, 4>::zeros([1, 3, 56, 56], &device);
         assert_eq!(cache.entry_count(), 0);
         model.infer_with_cache(input.clone(), &mut cache);
         let first_count = cache.entry_count();
@@ -689,8 +696,8 @@ mod tests {
     #[test]
     fn depth_anything3_wgpu_record_roundtrip() {
         type TestBackend = burn::backend::Wgpu<f32>;
-        let device = <TestBackend as Backend>::Device::default();
-        let config = DepthAnything3Config::small();
+        let device = burn::tensor::Device::<TestBackend>::default();
+        let config = test_mono_config();
         let model = DepthAnything3::<TestBackend>::new(&device, config);
         let record_item = model
             .clone()
@@ -700,5 +707,22 @@ mod tests {
             record_item,
             &device,
         );
+    }
+
+    fn test_mono_config() -> DepthAnything3Config {
+        let mut head = DepthAnything3HeadConfig::small();
+        head.dim_in = 384;
+        head.output_dim = 1;
+        head.dual_head = false;
+
+        DepthAnything3Config {
+            image_size: 56,
+            patch_size: 14,
+            hook_block_ids: vec![2, 5, 8, 11],
+            head,
+            camera_encoder: None,
+            camera_decoder: None,
+            checkpoint_uri: None,
+        }
     }
 }

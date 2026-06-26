@@ -7,7 +7,7 @@ use std::{
 
 use burn::prelude::*;
 use burn_depth::{
-    InferenceBackend,
+    DepthPrecision, InferenceBackend,
     inference::{DepthPrediction, infer_from_rgb},
     model::{AnyDepthModel, DepthModelKind, ImageCropRegion, PreparedModelImage},
 };
@@ -28,26 +28,45 @@ struct Args {
 
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
+
+    #[arg(long, value_enum, default_value_t = PrecisionArg::F32)]
+    precision: PrecisionArg,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ModelArg {
     DepthPro,
-    DepthAnything3,
+    #[value(name = "depth-anything3-metric-large", alias = "depth-anything3")]
+    DepthAnything3MetricLarge,
 }
 
 impl From<ModelArg> for DepthModelKind {
     fn from(value: ModelArg) -> Self {
         match value {
             ModelArg::DepthPro => DepthModelKind::DepthPro,
-            ModelArg::DepthAnything3 => DepthModelKind::DepthAnything3,
+            ModelArg::DepthAnything3MetricLarge => DepthModelKind::DepthAnything3MetricLarge,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PrecisionArg {
+    F32,
+    F16,
+}
+
+impl From<PrecisionArg> for DepthPrecision {
+    fn from(value: PrecisionArg) -> Self {
+        match value {
+            PrecisionArg::F32 => DepthPrecision::F32,
+            PrecisionArg::F16 => DepthPrecision::F16,
         }
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let device = <InferenceBackend as Backend>::Device::default();
+    let device = burn::tensor::Device::<InferenceBackend>::default();
     let kind: DepthModelKind = args.model.into();
 
     let checkpoint = args
@@ -61,7 +80,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let model = AnyDepthModel::load(kind, &device, &checkpoint)?;
+    let model =
+        AnyDepthModel::load_with_precision(kind, &device, &checkpoint, args.precision.into())?;
 
     let image_path = args.image;
     let image = image::open(&image_path)

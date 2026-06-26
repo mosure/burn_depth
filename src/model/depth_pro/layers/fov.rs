@@ -31,7 +31,9 @@ impl<B: Backend> ConvActivation<B> {
     ) -> Self {
         let conv = Conv2dConfig::new([in_channels, out_channels], [kernel_size, kernel_size])
             .with_stride([stride, stride])
-            .with_padding(PaddingConfig2d::Explicit(padding, padding))
+            .with_padding(PaddingConfig2d::Explicit(
+                padding, padding, padding, padding,
+            ))
             .init(device);
 
         Self { conv, with_relu }
