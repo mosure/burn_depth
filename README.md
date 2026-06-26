@@ -75,10 +75,18 @@ Each part URL is resolved relative to the manifest URL, so a manifest entry name
 https://aberration.technology/model/burn_depth/da3/da3_metric_large_f16.part-00000.bpk
 ```
 
-Native loads download the manifest and missing/stale parts into the cache using partial files,
-verify SHA256/byte lengths, assemble the full `.bpk`, and reuse the cached model when
-`allow_download` is false. Wasm callers should use an async fetch integration; the core loader
-does not perform synchronous XHR.
+Native `DepthPipeline::load` downloads the manifest and missing/stale parts into
+`cache_dir.unwrap_or_else(default_cache_dir)` using partial files, verifies SHA256/byte lengths,
+assembles the full `.bpk`, and reuses the cached model when `allow_download` is false. The default
+native cache directory is `$HOME/.burn_depth`.
+
+Browser wasm callers should use `DepthPipeline::load_async` or
+`resolve_checkpoint_bytes_async`. The wasm loader uses `fetch` plus browser `CacheStorage` cache
+`burn_depth:model-shards:v1`, caches the manifest and each part by URL, verifies cached bytes before
+use, refetches corrupt entries when `allow_download` is true, assembles the `.bpk` bytes in memory,
+and deserializes the model from BurnPack bytes. It does not use synchronous XHR or synchronous file
+paths. Native `load_async` delegates back to the file-backed loader so native performance stays on
+the same path as `load`.
 
 ## setup
 

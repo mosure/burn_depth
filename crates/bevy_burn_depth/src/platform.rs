@@ -1,16 +1,17 @@
 #[cfg(feature = "native")]
 pub mod camera {
     use std::sync::{
-        Arc, Mutex,
         mpsc::{self, Receiver, Sender, SyncSender, TryRecvError},
+        Arc, Mutex,
     };
 
     use image::RgbImage;
     use nokhwa::{
-        CallbackCamera, nokhwa_initialize,
+        nokhwa_initialize,
         pixel_format::RgbFormat,
         query,
         utils::{ApiBackend, RequestedFormat, RequestedFormatType},
+        CallbackCamera,
     };
     use once_cell::sync::OnceCell;
 

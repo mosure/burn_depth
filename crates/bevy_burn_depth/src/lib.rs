@@ -4,10 +4,10 @@ use burn::prelude::*;
 use burn_depth::{
     inference::infer_from_rgb,
     model::{
-        PreparedModelImage, depth_anything3::CachedDepthAnything3, prepare_depth_anything3_image,
+        depth_anything3::CachedDepthAnything3, prepare_depth_anything3_image, PreparedModelImage,
     },
 };
-use image::{RgbImage, imageops};
+use image::{imageops, RgbImage};
 
 pub mod platform;
 
@@ -95,10 +95,18 @@ fn prepare_input_frame(
             value
         } else if value >= alignment {
             let rem = value % alignment;
-            if rem == 0 { value } else { value - rem }
+            if rem == 0 {
+                value
+            } else {
+                value - rem
+            }
         } else {
             let rem = value % patch_size;
-            if rem == 0 { value } else { value - rem }
+            if rem == 0 {
+                value
+            } else {
+                value - rem
+            }
         }
     };
 

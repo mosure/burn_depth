@@ -9,8 +9,14 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::JsCast;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen_futures::JsFuture;
 
 pub const DEFAULT_CDN_BASE_URL: &str = "https://aberration.technology/model/burn_depth";
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+const BROWSER_CACHE_NAME: &str = "burn_depth:model-shards:v1";
 const DEFAULT_CACHE_DIR: &str = ".burn_depth";
 #[cfg(not(target_arch = "wasm32"))]
 const DOWNLOAD_MAX_ATTEMPTS: u32 = 4;
@@ -226,6 +232,13 @@ pub struct DepthArtifactPart {
     pub sha256: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct DepthArtifactBytes {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub manifest: Option<DepthArtifactManifest>,
+}
+
 pub fn read_parts_manifest(
     path: impl AsRef<Path>,
 ) -> Result<DepthArtifactManifest, DepthLoadError> {
@@ -249,6 +262,63 @@ pub fn resolve_checkpoint(
             config.allow_download,
             &mut progress,
         ),
+    }
+}
+
+pub async fn resolve_checkpoint_bytes_async(
+    config: &DepthLoadConfig,
+    progress: Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<DepthArtifactBytes, DepthLoadError> {
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+    {
+        let mut progress = progress;
+        match &config.checkpoint {
+            DepthCheckpointSource::Cdn { base_url, manifest } => {
+                resolve_cdn_checkpoint_bytes_wasm(
+                    base_url,
+                    manifest,
+                    config.allow_download,
+                    &mut progress,
+                )
+                .await
+            }
+            DepthCheckpointSource::Local(path) => {
+                Err(DepthLoadError::DownloadUnsupported(format!(
+                    "local checkpoint `{}` is not available in browser wasm; use a CDN checkpoint",
+                    path.display()
+                )))
+            }
+            DepthCheckpointSource::PartsManifest(path) => {
+                Err(DepthLoadError::DownloadUnsupported(format!(
+                    "local parts manifest `{}` is not available in browser wasm; use a CDN checkpoint",
+                    path.display()
+                )))
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm")))]
+    {
+        let _ = config;
+        let _ = progress;
+        Err(DepthLoadError::DownloadUnsupported(
+            "browser checkpoint byte loading requires the `wasm` feature".to_string(),
+        ))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let checkpoint = resolve_checkpoint(config, progress)?;
+        let bytes = fs::read(&checkpoint)?;
+        Ok(DepthArtifactBytes {
+            name: checkpoint
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("model.bpk")
+                .to_string(),
+            bytes,
+            manifest: None,
+        })
     }
 }
 
@@ -333,6 +403,102 @@ fn download_cdn_checkpoint(
     )))
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn resolve_cdn_checkpoint_bytes_wasm(
+    base_url: &str,
+    manifest: &str,
+    allow_download: bool,
+    progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<DepthArtifactBytes, DepthLoadError> {
+    let cache = open_browser_cache().await?;
+    let manifest_url = cdn_manifest_url(base_url, manifest);
+    emit(
+        progress,
+        DepthLoadEvent::new(DepthLoadStage::Manifest, format!("loading {manifest_url}")),
+    );
+
+    let manifest_bytes = browser_cached_or_fetch_bytes(
+        &cache,
+        &manifest_url,
+        allow_download,
+        DepthLoadStage::Manifest,
+        "manifest",
+        progress,
+    )
+    .await?;
+
+    let artifact_manifest = match serde_json::from_slice::<DepthArtifactManifest>(&manifest_bytes) {
+        Ok(manifest) => manifest,
+        Err(err) if allow_download => {
+            emit(
+                progress,
+                DepthLoadEvent::new(
+                    DepthLoadStage::CacheMiss,
+                    format!("discarding corrupt cached manifest: {err}"),
+                ),
+            );
+            browser_delete_cache_entry(&cache, &manifest_url).await?;
+            let manifest_bytes = browser_fetch_and_cache_bytes(&cache, &manifest_url).await?;
+            serde_json::from_slice::<DepthArtifactManifest>(&manifest_bytes)?
+        }
+        Err(err) => return Err(DepthLoadError::Manifest(err)),
+    };
+    validate_artifact_manifest(&artifact_manifest, &manifest_url)?;
+
+    let output_name = artifact_name_from_manifest_str(manifest)
+        .unwrap_or_else(|| format!("{}.bpk", artifact_manifest.model_id));
+    let capacity = usize::try_from(artifact_manifest.total_bytes).map_err(|_| {
+        DepthLoadError::InvalidSource(format!(
+            "artifact `{}` is too large for this wasm target: {} bytes",
+            artifact_manifest.model_id, artifact_manifest.total_bytes
+        ))
+    })?;
+    let mut artifact = Vec::with_capacity(capacity);
+    let mut full_hasher = Sha256::new();
+
+    for (index, part) in artifact_manifest.parts.iter().enumerate() {
+        let part_url = resolve_manifest_entry_url(&manifest_url, &part.name);
+        let bytes = browser_cached_or_fetch_verified_part(
+            &cache,
+            &part_url,
+            part,
+            allow_download,
+            index,
+            artifact_manifest.parts.len(),
+            progress,
+        )
+        .await?;
+        full_hasher.update(&bytes);
+        artifact.extend_from_slice(&bytes);
+    }
+
+    if artifact.len() as u64 != artifact_manifest.total_bytes {
+        return Err(DepthLoadError::LengthMismatch {
+            path: PathBuf::from(&output_name),
+            expected: artifact_manifest.total_bytes,
+            actual: artifact.len() as u64,
+        });
+    }
+    let actual = hex_sha256(full_hasher.finalize().as_slice());
+    if actual != normalize_sha256(&artifact_manifest.artifact_sha256) {
+        return Err(DepthLoadError::HashMismatch {
+            path: PathBuf::from(&output_name),
+            expected: normalize_sha256(&artifact_manifest.artifact_sha256),
+            actual,
+        });
+    }
+    emit(
+        progress,
+        DepthLoadEvent::new(DepthLoadStage::Verify, "verified assembled artifact bytes"),
+    );
+
+    Ok(DepthArtifactBytes {
+        name: output_name,
+        bytes: artifact,
+        manifest: Some(artifact_manifest),
+    })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn download_cdn_checkpoint(
     base_url: &str,
@@ -350,11 +516,7 @@ fn download_cdn_checkpoint(
     );
     let manifest_bytes = download_bytes_with_retries(&manifest_url)?;
     let artifact_manifest: DepthArtifactManifest = serde_json::from_slice(&manifest_bytes)?;
-    if artifact_manifest.parts.is_empty() {
-        return Err(DepthLoadError::InvalidSource(format!(
-            "CDN manifest {manifest_url} has no parts"
-        )));
-    }
+    validate_artifact_manifest(&artifact_manifest, &manifest_url)?;
     write_file_atomically(local_manifest_path, &manifest_bytes)?;
 
     for (index, part) in artifact_manifest.parts.iter().enumerate() {
@@ -612,6 +774,39 @@ fn artifact_name_from_manifest_path(path: &Path) -> Option<String> {
     name.strip_suffix(".parts.json").map(ToOwned::to_owned)
 }
 
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+fn artifact_name_from_manifest_str(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.strip_suffix(".parts.json").map(ToOwned::to_owned)
+}
+
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm"))]
+fn validate_artifact_manifest(
+    manifest: &DepthArtifactManifest,
+    source: &str,
+) -> Result<(), DepthLoadError> {
+    if manifest.parts.is_empty() {
+        return Err(DepthLoadError::InvalidSource(format!(
+            "CDN manifest {source} has no parts"
+        )));
+    }
+    let part_total = manifest
+        .parts
+        .iter()
+        .try_fold(0u64, |total, part| total.checked_add(part.byte_length))
+        .ok_or_else(|| {
+            DepthLoadError::InvalidSource(format!("CDN manifest {source} part sizes overflow u64"))
+        })?;
+    if part_total != manifest.total_bytes {
+        return Err(DepthLoadError::LengthMismatch {
+            path: PathBuf::from(source),
+            expected: manifest.total_bytes,
+            actual: part_total,
+        });
+    }
+    Ok(())
+}
+
 fn safe_relative_path(value: &str) -> PathBuf {
     let without_fragment = value.split('#').next().unwrap_or(value);
     let without_query = without_fragment
@@ -647,7 +842,7 @@ fn join_url(root: &str, rel: &str) -> String {
     out
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm"))]
 fn resolve_manifest_entry_url(manifest_url: &str, entry_url: &str) -> String {
     if entry_url.contains("://") || entry_url.starts_with('/') {
         return entry_url.to_string();
@@ -789,6 +984,273 @@ fn write_file_atomically(path: &Path, bytes: &[u8]) -> Result<(), DepthLoadError
     }
     fs::rename(temp_path, path)?;
     Ok(())
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn open_browser_cache() -> Result<web_sys::Cache, DepthLoadError> {
+    let window = web_sys::window().ok_or_else(|| {
+        DepthLoadError::DownloadUnsupported(
+            "browser window is unavailable for CDN model loading".to_string(),
+        )
+    })?;
+    let cache_storage = window.caches().map_err(|err| {
+        DepthLoadError::DownloadUnsupported(format!(
+            "browser CacheStorage is unavailable: {}",
+            format_js_error(err)
+        ))
+    })?;
+    let cache = JsFuture::from(cache_storage.open(BROWSER_CACHE_NAME))
+        .await
+        .map_err(|err| {
+            DepthLoadError::Download(format!(
+                "failed to open browser cache `{BROWSER_CACHE_NAME}`: {}",
+                format_js_error(err)
+            ))
+        })?;
+    cache.dyn_into::<web_sys::Cache>().map_err(|err| {
+        DepthLoadError::Download(format!(
+            "browser cache `{BROWSER_CACHE_NAME}` had unexpected type: {}",
+            format_js_error(err)
+        ))
+    })
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn browser_cached_or_fetch_verified_part(
+    cache: &web_sys::Cache,
+    url: &str,
+    part: &DepthArtifactPart,
+    allow_download: bool,
+    index: usize,
+    total: usize,
+    progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<Vec<u8>, DepthLoadError> {
+    match browser_cached_bytes(cache, url).await? {
+        Some(bytes) => match verify_bytes(
+            Path::new(&part.name),
+            &bytes,
+            part.byte_length,
+            &part.sha256,
+        ) {
+            Ok(()) => {
+                emit(
+                    progress,
+                    DepthLoadEvent::progress(
+                        DepthLoadStage::CacheHit,
+                        format!("using cached {url}"),
+                        index + 1,
+                        total,
+                    ),
+                );
+                return Ok(bytes);
+            }
+            Err(err) if allow_download => {
+                emit(
+                    progress,
+                    DepthLoadEvent::progress(
+                        DepthLoadStage::CacheMiss,
+                        format!("discarding corrupt cached part: {err}"),
+                        index + 1,
+                        total,
+                    ),
+                );
+                browser_delete_cache_entry(cache, url).await?;
+            }
+            Err(err) => return Err(err),
+        },
+        None if !allow_download => {
+            return Err(DepthLoadError::InvalidSource(format!(
+                "downloads disabled and cached CDN part is missing: {url}"
+            )));
+        }
+        None => {
+            emit(
+                progress,
+                DepthLoadEvent::progress(
+                    DepthLoadStage::CacheMiss,
+                    format!("missing {url}"),
+                    index + 1,
+                    total,
+                ),
+            );
+        }
+    }
+
+    emit(
+        progress,
+        DepthLoadEvent::progress(
+            DepthLoadStage::Part,
+            format!("downloading {url}"),
+            index + 1,
+            total,
+        ),
+    );
+    let bytes = browser_fetch_and_cache_bytes(cache, url).await?;
+    verify_bytes(
+        Path::new(&part.name),
+        &bytes,
+        part.byte_length,
+        &part.sha256,
+    )?;
+    Ok(bytes)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn browser_cached_or_fetch_bytes(
+    cache: &web_sys::Cache,
+    url: &str,
+    allow_download: bool,
+    stage: DepthLoadStage,
+    label: &str,
+    progress: &mut Option<&mut dyn FnMut(DepthLoadEvent)>,
+) -> Result<Vec<u8>, DepthLoadError> {
+    if let Some(bytes) = browser_cached_bytes(cache, url).await? {
+        emit(
+            progress,
+            DepthLoadEvent::new(DepthLoadStage::CacheHit, format!("using cached {url}")),
+        );
+        return Ok(bytes);
+    }
+
+    if !allow_download {
+        return Err(DepthLoadError::InvalidSource(format!(
+            "downloads disabled and cached CDN {label} is missing: {url}"
+        )));
+    }
+
+    emit(
+        progress,
+        DepthLoadEvent::new(DepthLoadStage::CacheMiss, format!("missing {url}")),
+    );
+    emit(
+        progress,
+        DepthLoadEvent::new(stage, format!("downloading {url}")),
+    );
+    browser_fetch_and_cache_bytes(cache, url).await
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn browser_cached_bytes(
+    cache: &web_sys::Cache,
+    url: &str,
+) -> Result<Option<Vec<u8>>, DepthLoadError> {
+    let value = JsFuture::from(cache.match_with_str(url))
+        .await
+        .map_err(|err| {
+            DepthLoadError::Download(format!(
+                "failed to read browser cache entry {url}: {}",
+                format_js_error(err)
+            ))
+        })?;
+    if value.is_undefined() || value.is_null() {
+        return Ok(None);
+    }
+    let response = value.dyn_into::<web_sys::Response>().map_err(|err| {
+        DepthLoadError::Download(format!(
+            "cached response for {url} had unexpected type: {}",
+            format_js_error(err)
+        ))
+    })?;
+    response_bytes(&response, url).await.map(Some)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn browser_fetch_and_cache_bytes(
+    cache: &web_sys::Cache,
+    url: &str,
+) -> Result<Vec<u8>, DepthLoadError> {
+    let window = web_sys::window().ok_or_else(|| {
+        DepthLoadError::DownloadUnsupported(
+            "browser window is unavailable for CDN model loading".to_string(),
+        )
+    })?;
+    let value = JsFuture::from(window.fetch_with_str(url))
+        .await
+        .map_err(|err| {
+            DepthLoadError::Download(format!("failed to fetch {url}: {}", format_js_error(err)))
+        })?;
+    let response = value.dyn_into::<web_sys::Response>().map_err(|err| {
+        DepthLoadError::Download(format!(
+            "fetch response for {url} had unexpected type: {}",
+            format_js_error(err)
+        ))
+    })?;
+    if !response.ok() {
+        return Err(DepthLoadError::Download(format!(
+            "HTTP {} ({}) for {url}",
+            response.status(),
+            response.status_text()
+        )));
+    }
+
+    let cache_response = response.clone().map_err(|err| {
+        DepthLoadError::Download(format!(
+            "failed to clone response for cache {url}: {}",
+            format_js_error(err)
+        ))
+    })?;
+    let bytes = response_bytes(&response, url).await?;
+    JsFuture::from(cache.put_with_str(url, &cache_response))
+        .await
+        .map_err(|err| {
+            DepthLoadError::Download(format!(
+                "failed to store browser cache entry {url}: {}",
+                format_js_error(err)
+            ))
+        })?;
+    Ok(bytes)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn browser_delete_cache_entry(
+    cache: &web_sys::Cache,
+    url: &str,
+) -> Result<(), DepthLoadError> {
+    JsFuture::from(cache.delete_with_str(url))
+        .await
+        .map_err(|err| {
+            DepthLoadError::Download(format!(
+                "failed to delete browser cache entry {url}: {}",
+                format_js_error(err)
+            ))
+        })?;
+    Ok(())
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+async fn response_bytes(
+    response: &web_sys::Response,
+    url: &str,
+) -> Result<Vec<u8>, DepthLoadError> {
+    let buffer = JsFuture::from(response.array_buffer().map_err(|err| {
+        DepthLoadError::Download(format!(
+            "failed to request response bytes for {url}: {}",
+            format_js_error(err)
+        ))
+    })?)
+    .await
+    .map_err(|err| {
+        DepthLoadError::Download(format!(
+            "failed to read response bytes for {url}: {}",
+            format_js_error(err)
+        ))
+    })?;
+    let bytes = js_sys::Uint8Array::new(&buffer);
+    let mut out = vec![0; bytes.length() as usize];
+    bytes.copy_to(&mut out);
+    Ok(out)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+fn format_js_error(value: wasm_bindgen::JsValue) -> String {
+    value
+        .as_string()
+        .or_else(|| {
+            js_sys::JSON::stringify(&value)
+                .ok()
+                .and_then(|s| s.as_string())
+        })
+        .unwrap_or_else(|| "<non-string JavaScript error>".to_string())
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,6 +1,8 @@
 use burn::prelude::*;
 use image::{DynamicImage, imageops::FilterType};
 
+#[cfg(target_arch = "wasm32")]
+use crate::loader::resolve_checkpoint_bytes_async;
 use crate::{
     inference::{DepthModel, DepthPrediction, rgb_to_input_tensor},
     loader::{DepthLoadConfig, DepthLoadError, DepthLoadEvent, DepthLoadStage, resolve_checkpoint},
@@ -55,15 +57,7 @@ impl<B: Backend> DepthPipeline<B> {
         config: DepthLoadConfig,
         mut progress: impl FnMut(DepthLoadEvent),
     ) -> Result<Self, DepthPipelineError> {
-        if config.require_gpu
-            && !backend_name::<B>().contains("Wgpu")
-            && !backend_name::<B>().contains("Cuda")
-        {
-            return Err(DepthPipelineError::Backend(format!(
-                "GPU was required but backend `{}` is not a GPU backend",
-                backend_name::<B>()
-            )));
-        }
+        validate_backend_requirement::<B>(&config)?;
 
         let checkpoint = resolve_checkpoint(&config, Some(&mut progress))?;
         progress(DepthLoadEvent::new(
@@ -81,6 +75,51 @@ impl<B: Backend> DepthPipeline<B> {
             model,
             device: device.clone(),
         })
+    }
+
+    pub async fn load_async(
+        device: &B::Device,
+        config: DepthLoadConfig,
+    ) -> Result<Self, DepthPipelineError> {
+        Self::load_async_with_progress(device, config, |_| {}).await
+    }
+
+    pub async fn load_async_with_progress(
+        device: &B::Device,
+        config: DepthLoadConfig,
+        progress: impl FnMut(DepthLoadEvent),
+    ) -> Result<Self, DepthPipelineError> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut progress = progress;
+            validate_backend_requirement::<B>(&config)?;
+            let artifact = resolve_checkpoint_bytes_async(&config, Some(&mut progress)).await?;
+            progress(DepthLoadEvent::new(
+                DepthLoadStage::Deserialize,
+                format!("loading {}", artifact.name),
+            ));
+            let model = AnyDepthModel::load_with_precision_from_bytes(
+                config.model,
+                device,
+                &artifact.name,
+                artifact.bytes,
+                config.precision,
+            )
+            .map_err(DepthPipelineError::Model)?;
+            progress(DepthLoadEvent::new(
+                DepthLoadStage::ModelReady,
+                "model ready",
+            ));
+            return Ok(Self {
+                model,
+                device: device.clone(),
+            });
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::load_with_progress(device, config, progress)
+        }
     }
 
     pub fn predict(
@@ -119,4 +158,19 @@ impl<B: Backend> DepthPipeline<B> {
 
 fn backend_name<B: Backend>() -> &'static str {
     std::any::type_name::<B>()
+}
+
+fn validate_backend_requirement<B: Backend>(
+    config: &DepthLoadConfig,
+) -> Result<(), DepthPipelineError> {
+    if config.require_gpu
+        && !backend_name::<B>().contains("Wgpu")
+        && !backend_name::<B>().contains("Cuda")
+    {
+        return Err(DepthPipelineError::Backend(format!(
+            "GPU was required but backend `{}` is not a GPU backend",
+            backend_name::<B>()
+        )));
+    }
+    Ok(())
 }

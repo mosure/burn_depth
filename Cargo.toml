@@ -1,7 +1,7 @@
 [package]
 name = "burn_depth"
 description = "burn depth pro model inference"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 authors = ["mosure <mitchell@mosure.me>"]
 license = "MIT OR Apache-2.0"
@@ -56,9 +56,12 @@ backend_ndarray = ["burn/ndarray", "burn_dino/backend_ndarray"]
 backend_wgpu = ["burn/wgpu", "burn_dino/backend_wgpu", "half"]
 bpk = ["burn-store"]
 wasm = [
+  "bpk",
   "backend_wgpu",
+  "dep:js-sys",
   "dep:console_error_panic_hook",
   "dep:wasm-bindgen",
+  "dep:wasm-bindgen-futures",
   "dep:web-sys",
 ]
 
@@ -89,18 +92,24 @@ features = [
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = { version = "0.1", optional = true }
 getrandom = { version = "0.4", features = ["wasm_js"] }
+js-sys = { version = "0.3", optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
 
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
 version = "0.3"
 optional = true
 features = [
+  'Cache',
+  'CacheStorage',
   'Document',
   'Element',
   'HtmlElement',
   'Location',
   'Node',
+  'Request',
+  'Response',
   'Window',
 ]
 

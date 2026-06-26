@@ -1,6 +1,7 @@
 use burn_depth::loader::{
     DEFAULT_CDN_BASE_URL, DepthArtifactManifest, DepthArtifactPart, DepthPrecision,
-    assemble_parts_manifest, cdn_manifest_url, resolve_checkpoint, sha256_file,
+    assemble_parts_manifest, cdn_manifest_url, resolve_checkpoint, resolve_checkpoint_bytes_async,
+    sha256_file,
 };
 use burn_depth::{DepthCheckpointSource, DepthLoadConfig, DepthModelKind};
 use sha2::Digest;
@@ -73,6 +74,77 @@ fn sharded_load_reconstructs_single_artifact() {
     let resolved = assemble_parts_manifest(&manifest_path, Some(&dir), &mut None).unwrap();
     assert_eq!(resolved, dir.join("fixture.bpk"));
     assert_eq!(fs::read(resolved).unwrap(), artifact);
+
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn async_byte_resolver_matches_sharded_artifact_bytes() {
+    let dir = std::env::temp_dir().join(format!(
+        "burn_depth_async_bytes_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&dir).unwrap();
+
+    let artifact = b"burn-depth-async-sharded-artifact";
+    let part0 = &artifact[..11];
+    let part1 = &artifact[11..];
+    let part0_path = dir.join("fixture.part-00000.bpk");
+    let part1_path = dir.join("fixture.part-00001.bpk");
+    fs::write(&part0_path, part0).unwrap();
+    fs::write(&part1_path, part1).unwrap();
+
+    let manifest = DepthArtifactManifest {
+        model_id: "fixture".to_string(),
+        model_family: "test".to_string(),
+        precision: DepthPrecision::F32,
+        source_checkpoint_hash: None,
+        source_upstream: None,
+        burn_version: "0.21.0".to_string(),
+        importer_version: env!("CARGO_PKG_VERSION").to_string(),
+        artifact_sha256: sha256_bytes(artifact),
+        parts: vec![
+            DepthArtifactPart {
+                name: "fixture.part-00000.bpk".to_string(),
+                byte_length: part0.len() as u64,
+                sha256: sha256_bytes(part0),
+            },
+            DepthArtifactPart {
+                name: "fixture.part-00001.bpk".to_string(),
+                byte_length: part1.len() as u64,
+                sha256: sha256_bytes(part1),
+            },
+        ],
+        tensor_count: Some(0),
+        total_bytes: artifact.len() as u64,
+        created_timestamp: "1970-01-01T00:00:00Z".to_string(),
+    };
+    let manifest_path = dir.join("fixture.bpk.parts.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let config = DepthLoadConfig {
+        model: DepthModelKind::DepthPro,
+        precision: DepthPrecision::F32,
+        checkpoint: DepthCheckpointSource::PartsManifest(manifest_path),
+        cache_dir: Some(cache_dir.clone()),
+        allow_download: false,
+        require_gpu: false,
+    };
+    let artifact_bytes = pollster::block_on(resolve_checkpoint_bytes_async(&config, None)).unwrap();
+
+    assert_eq!(artifact_bytes.name, "fixture.bpk");
+    assert_eq!(artifact_bytes.bytes, artifact);
+    assert!(artifact_bytes.manifest.is_none());
+    assert_eq!(fs::read(cache_dir.join("fixture.bpk")).unwrap(), artifact);
 
     fs::remove_dir_all(dir).unwrap();
 }

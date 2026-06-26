@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_burn_depth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "bevy_args",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "burn_depth"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "burn",
  "burn-import",
@@ -2590,6 +2590,7 @@ dependencies = [
  "getrandom 0.4.3",
  "half",
  "image",
+ "js-sys",
  "pollster",
  "safetensors 0.6.2",
  "serde",
@@ -2598,6 +2599,7 @@ dependencies = [
  "stacker",
  "ureq",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
 ]

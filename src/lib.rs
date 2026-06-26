@@ -12,9 +12,9 @@ pub use geometry::{
     estimate_floor_plane, pixel_to_ray,
 };
 pub use loader::{
-    DepthArtifactManifest, DepthArtifactPart, DepthCheckpointSource, DepthLoadConfig,
-    DepthLoadError, DepthLoadEvent, DepthLoadStage, DepthPrecision, cdn_manifest_url,
-    default_cache_dir, default_cdn_base_url,
+    DepthArtifactBytes, DepthArtifactManifest, DepthArtifactPart, DepthCheckpointSource,
+    DepthLoadConfig, DepthLoadError, DepthLoadEvent, DepthLoadStage, DepthPrecision,
+    cdn_manifest_url, default_cache_dir, default_cdn_base_url, resolve_checkpoint_bytes_async,
 };
 pub use model::DepthModelKind;
 pub use pipeline::{DepthPipeline, DepthPipelineError, DepthRuntimeConfig};
